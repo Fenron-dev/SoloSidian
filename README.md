@@ -9,6 +9,7 @@ Der erste Prototyp konzentriert sich auf:
 - Haushalte, Familien, NPCs, POIs und Beziehungen,
 - eine Beziehungspflege über eine Obsidian-Ansicht,
 - synchronisierte Beziehungen auch bei direkten YAML-Änderungen,
+- eine lokale Datenintegritätsprüfung für Entitäten und Beziehungen,
 - eine Grundlage für Bases-Übersichten.
 
 ## Entwicklung

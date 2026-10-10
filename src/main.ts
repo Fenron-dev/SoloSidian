@@ -2,6 +2,7 @@ import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, normalize
 import { entityMarkdown, relationshipsMarkdown } from "./core/markdown";
 import { generateSettlement } from "./core/settlement-generator";
 import type { RelationshipType } from "./core/types";
+import { validateEntities } from "./core/validator";
 
 interface SoloSidianSettings {
   rootFolder: string;
@@ -30,6 +31,7 @@ export default class SoloSidianPlugin extends Plugin {
     this.addSettingTab(new SoloSidianSettingTab(this.app, this));
     this.addCommand({ id: "generate-settlement", name: "Siedlung generieren", callback: () => new SettlementModal(this.app, this).open() });
     this.addCommand({ id: "edit-relationship", name: "Beziehung anpassen", callback: () => new RelationshipModal(this.app, this).open() });
+    this.addCommand({ id: "validate-vault", name: "Datenintegrität prüfen", callback: () => this.validateVault() });
     this.addRibbonIcon("network", "SoloSidian: Siedlung generieren", () => new SettlementModal(this.app, this).open());
     this.registerEvent(this.app.metadataCache.on("changed", (file) => { void this.reconcileRelationshipFile(file); }));
     this.app.workspace.onLayoutReady(() => this.captureRelationshipSnapshot());
@@ -37,6 +39,20 @@ export default class SoloSidianPlugin extends Plugin {
 
   async loadSettings(): Promise<void> { this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData()); }
   async saveSettings(): Promise<void> { await this.saveData(this.settings); }
+
+  validateVault(): void {
+    const root = normalizePath(this.settings.rootFolder).replace(/\/$/, "");
+    const files = this.app.vault.getMarkdownFiles()
+      .filter((file) => file.path.startsWith(`${root}/`))
+      .map((file) => ({ path: file.path, frontmatter: this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined }));
+    const issues = validateEntities(files);
+    if (issues.length === 0) {
+      new Notice(`${files.length} Markdown-Dateien geprüft: Keine Datenintegritätsfehler gefunden.`);
+      return;
+    }
+    const firstIssues = issues.slice(0, 3).map((issue) => `${issue.path}: ${issue.message}`).join(" | ");
+    new Notice(`${issues.length} Datenintegritätsproblem(e). ${firstIssues}`, 10000);
+  }
 
   async writeSettlement(seed: string, name: string): Promise<void> {
     const safeName = name.trim().replace(/[\\/:*?"<>|]/g, "-") || "Eichenfurt";
