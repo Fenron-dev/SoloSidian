@@ -8,9 +8,22 @@ interface SoloSidianSettings {
 }
 
 const DEFAULT_SETTINGS: SoloSidianSettings = { rootFolder: "RPG" };
+type RelationshipEntry = { id: string; type: RelationshipType };
+
+const RECIPROCAL_TYPES: Record<RelationshipType, RelationshipType> = {
+  "parent-child": "parent-child",
+  partner: "partner",
+  sibling: "sibling",
+  friend: "friend",
+  rival: "rival",
+  colleague: "colleague",
+  resident: "resident",
+};
 
 export default class SoloSidianPlugin extends Plugin {
   settings: SoloSidianSettings = DEFAULT_SETTINGS;
+  private relationshipSnapshot = new Map<string, Map<string, RelationshipType>>();
+  private relationshipSyncGuard = new Set<string>();
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -18,6 +31,8 @@ export default class SoloSidianPlugin extends Plugin {
     this.addCommand({ id: "generate-settlement", name: "Siedlung generieren", callback: () => new SettlementModal(this.app, this).open() });
     this.addCommand({ id: "edit-relationship", name: "Beziehung anpassen", callback: () => new RelationshipModal(this.app, this).open() });
     this.addRibbonIcon("network", "SoloSidian: Siedlung generieren", () => new SettlementModal(this.app, this).open());
+    this.registerEvent(this.app.metadataCache.on("changed", (file) => { void this.reconcileRelationshipFile(file); }));
+    this.app.workspace.onLayoutReady(() => this.captureRelationshipSnapshot());
   }
 
   async loadSettings(): Promise<void> { this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData()); }
@@ -53,18 +68,72 @@ export default class SoloSidianPlugin extends Plugin {
   }
 
   async addRelationship(from: TFile, to: TFile, type: RelationshipType): Promise<void> {
-    const reciprocal: Record<RelationshipType, RelationshipType | undefined> = { "parent-child": "parent-child", partner: "partner", sibling: "sibling", friend: "friend", rival: "rival", colleague: "colleague", resident: "resident" };
-    await this.app.fileManager.processFrontMatter(from, (frontmatter) => {
-      const current = Array.isArray(frontmatter.relationships) ? frontmatter.relationships : [];
-      if (!current.some((item: unknown) => typeof item === "object" && item !== null && (item as { id?: string }).id === to.path)) current.push({ id: to.path, type });
-      frontmatter.relationships = current;
-    });
-    await this.app.fileManager.processFrontMatter(to, (frontmatter) => {
-      const current = Array.isArray(frontmatter.relationships) ? frontmatter.relationships : [];
-      if (!current.some((item: unknown) => typeof item === "object" && item !== null && (item as { id?: string }).id === from.path)) current.push({ id: from.path, type: reciprocal[type] });
-      frontmatter.relationships = current;
-    });
+    await this.syncRelationshipPair(from, to, type);
     new Notice(`Beziehung zwischen ${from.basename} und ${to.basename} gespeichert.`);
+  }
+
+  private captureRelationshipSnapshot(): void {
+    for (const file of this.app.vault.getMarkdownFiles()) this.relationshipSnapshot.set(file.path, this.readRelationshipEntries(file));
+  }
+
+  private entityId(file: TFile): string {
+    const id = this.app.metadataCache.getFileCache(file)?.frontmatter?.id;
+    return typeof id === "string" ? id : file.path;
+  }
+
+  private readRelationshipEntries(file: TFile): Map<string, RelationshipType> {
+    const raw = this.app.metadataCache.getFileCache(file)?.frontmatter?.relationships;
+    const entries = new Map<string, RelationshipType>();
+    if (!Array.isArray(raw)) return entries;
+    for (const value of raw as RelationshipEntry[]) {
+      if (value && typeof value.id === "string" && value.type in RECIPROCAL_TYPES) entries.set(value.id, value.type);
+    }
+    return entries;
+  }
+
+  private resolveEntity(reference: string): TFile | null {
+    return this.app.vault.getMarkdownFiles().find((file) => file.path === reference || this.entityId(file) === reference) ?? null;
+  }
+
+  private async reconcileRelationshipFile(file: TFile): Promise<void> {
+    const current = this.readRelationshipEntries(file);
+    const previous = this.relationshipSnapshot.get(file.path) ?? new Map<string, RelationshipType>();
+    const references = new Set([...previous.keys(), ...current.keys()]);
+    this.relationshipSnapshot.set(file.path, current);
+    for (const reference of references) {
+      const target = this.resolveEntity(reference);
+      if (!target || target.path === file.path) continue;
+      const nextType = current.get(reference);
+      if (nextType) {
+        await this.syncRelationshipPair(file, target, nextType);
+      } else if (previous.has(reference)) {
+        await this.syncRelationshipPair(file, target, previous.get(reference)!, true);
+      }
+    }
+  }
+
+  private async syncRelationshipPair(from: TFile, to: TFile, type: RelationshipType, remove = false): Promise<void> {
+    const key = [from.path, to.path].sort().join("::");
+    if (this.relationshipSyncGuard.has(key)) return;
+    this.relationshipSyncGuard.add(key);
+    try {
+      await this.setRelationshipEntry(from, to, type, remove);
+      await this.setRelationshipEntry(to, from, RECIPROCAL_TYPES[type], remove);
+      this.relationshipSnapshot.set(from.path, this.readRelationshipEntries(from));
+      this.relationshipSnapshot.set(to.path, this.readRelationshipEntries(to));
+    } finally {
+      this.relationshipSyncGuard.delete(key);
+    }
+  }
+
+  private async setRelationshipEntry(file: TFile, target: TFile, type: RelationshipType, remove: boolean): Promise<void> {
+    const targetId = this.entityId(target);
+    await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+      const existing = Array.isArray(frontmatter.relationships) ? frontmatter.relationships as RelationshipEntry[] : [];
+      const filtered = existing.filter((entry) => entry?.id !== targetId && entry?.id !== target.path);
+      if (!remove) filtered.push({ id: targetId, type });
+      frontmatter.relationships = filtered;
+    });
   }
 }
 

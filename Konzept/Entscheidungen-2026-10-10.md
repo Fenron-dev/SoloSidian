@@ -16,7 +16,7 @@ Stand: 10. Oktober 2026. Grundlage: Konzept in `Ohne Titel.rtf` und anschließen
 - Gegenbeziehungen richten sich nach dem Beziehungstyp. Eltern/Kind ist eine Gegenbeziehung; einseitige Zuneigung wird nicht automatisch erwidert.
 - Bei widersprüchlichen Angaben fragt ein Dialog nach, statt stillschweigend vorhandene Informationen zu überschreiben.
 - Der Abgleich gilt innerhalb des jeweiligen Welt- oder Kampagnenstandes. Er darf keine getrennten Kampagnenstände unbeabsichtigt verändern.
-- Die technische Speicherung maßgeblicher Beziehungen und abgeleiteter Gegenreferenzen ist noch festzulegen.
+- Im ersten Prototyp werden Beziehungen als YAML-Liste mit stabiler Ziel-ID und Beziehungstyp gespeichert. Der Plugin-Core gleicht Änderungen aus dem Button und direkte YAML-Änderungen auf der Gegenseite ab; die endgültige Erweiterung um Zeiträume, Wissensstände und komplexere Beziehungstypen bleibt offen.
 
 ## Welten, Kampagnen und zeitliche Einordnung
 

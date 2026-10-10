@@ -8,6 +8,7 @@ Der erste Prototyp konzentriert sich auf:
 - eine kleine, reproduzierbare Siedlungsgenerierung,
 - Haushalte, Familien, NPCs, POIs und Beziehungen,
 - eine Beziehungspflege über eine Obsidian-Ansicht,
+- synchronisierte Beziehungen auch bei direkten YAML-Änderungen,
 - eine Grundlage für Bases-Übersichten.
 
 ## Entwicklung
