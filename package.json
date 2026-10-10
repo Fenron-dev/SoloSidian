@@ -1,6 +1,6 @@
 {
   "name": "solosidian",
-  "version": "0.2.9",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Offline-first solo RPG and worldbuilding tools for Obsidian.",

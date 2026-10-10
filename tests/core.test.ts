@@ -19,6 +19,7 @@ import { decideRelationshipSync } from "../src/core/relationship-sync.ts";
 import { generateRegion } from "../src/core/region.ts";
 import { AudioLibrary } from "../src/core/audio.ts";
 import { OfflineAiProvider } from "../src/core/ai.ts";
+import { ExtensionManager } from "../src/core/pack-manager.ts";
 
 test("dice rolls are bounded and reproducible with an injected random source", () => {
   const result = rollDice("2d6+1", () => 0.5);
@@ -119,4 +120,15 @@ test("region, audio and offline AI extensions stay bounded and credential-free",
   const suggestion = await new OfflineAiProvider().suggest("eine verlassene Mine");
   assert.equal(suggestion.source, "offline");
   assert.match(suggestion.text, /verlassene Mine/);
+});
+
+test("extension manager enforces dependency activation and safe removal", () => {
+  const manager = new ExtensionManager();
+  manager.install({ id: "base", name: "Base", version: "1.0.0" });
+  manager.install({ id: "addon", name: "Addon", version: "1.0.0", dependencies: ["base"] });
+  assert.throws(() => manager.activate("addon"));
+  manager.activate("base");
+  manager.activate("addon");
+  assert.deepEqual(manager.activationOrder().map((manifest) => manifest.id), ["base", "addon"]);
+  assert.throws(() => manager.uninstall("base"));
 });
