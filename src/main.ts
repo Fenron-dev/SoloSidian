@@ -516,7 +516,7 @@ export default class SoloSidianPlugin extends Plugin {
     const references = new Set([...previous.keys(), ...current.keys()]);
     this.relationshipSnapshot.set(file.path, current);
     for (const reference of references) {
-      const target = this.resolveEntity(reference);
+      const target = this.resolveEntity(reference, file);
       if (!target || target.path === file.path || !this.sameRelationshipScope(file, target)) continue;
       const nextRole = current.get(reference);
       if (nextRole) {
@@ -525,6 +525,7 @@ export default class SoloSidianPlugin extends Plugin {
         const targetRole = this.readRelationshipEntries(target).get(this.entityId(file));
         const changedRole = previousRole !== undefined && previousRole !== nextRole;
         const contradictoryTarget = targetRole !== undefined && targetRole !== reciprocalRole;
+        if (!changedRole && targetRole === reciprocalRole) continue;
         if ((changedRole || contradictoryTarget) && !await this.confirmRelationshipConflict(file, target, previousRole, nextRole, targetRole)) {
           if (previousRole) await this.syncRelationshipPair(file, target, previousRole, this.reciprocalRole(previousRole, file, target));
           else await this.syncRelationshipPair(file, target, nextRole, reciprocalRole, true);
@@ -558,6 +559,8 @@ export default class SoloSidianPlugin extends Plugin {
 
   private async setRelationshipEntry(file: TFile, target: TFile, role: RelationshipRole, remove: boolean): Promise<void> {
     const targetId = this.entityId(target);
+    const existing = this.readRelationshipEntries(file).get(targetId);
+    if (remove ? !existing : existing === role) return;
     await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
       const retained = this.readRoleEntries(file, frontmatter);
       retained.delete(targetId);
