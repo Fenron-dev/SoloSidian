@@ -8,6 +8,7 @@ import { askOracle, oracleCategories, randomEvent } from "./core/oracle.ts";
 import { performCheck, STANDARD_RULESET, type CheckResult } from "./core/rules.ts";
 import { generateHexMap, hexKey, moveHex, type HexDirection, type HexCell } from "./core/map.ts";
 import { forkCampaign, type CampaignSnapshot } from "./core/campaign.ts";
+import { sortTimeline, familyTree } from "./core/timeline.ts";
 import { generateDungeon } from "./core/dungeon.ts";
 
 interface SoloSidianSettings {
@@ -65,6 +66,8 @@ export default class SoloSidianPlugin extends Plugin {
     this.addCommand({ id: "run-check", name: "Probe durchführen", callback: () => new CheckModal(this.app, this).open() });
     this.addCommand({ id: "explore-map", name: "Karte erkunden", callback: () => new MapModal(this.app, this).open() });
     this.addCommand({ id: "generate-dungeon", name: "Dungeon generieren", callback: () => new DungeonModal(this.app, this).open() });
+    this.addCommand({ id: "generate-family-tree", name: "Familienstammbaum erstellen", callback: () => { void this.createFamilyTree(); } });
+    this.addCommand({ id: "generate-timeline", name: "Kampagnen-Timeline erstellen", callback: () => new TimelineModal(this.app, this).open() });
     this.addRibbonIcon("network", "SoloSidian: Siedlung generieren", () => new SettlementModal(this.app, this).open());
     this.addRibbonIcon("home", "SoloSidian: Dashboard öffnen", () => { void this.activateDashboard(); });
     this.registerEvent(this.app.metadataCache.on("changed", (file) => { void this.reconcileRelationshipFile(file); }));
@@ -154,6 +157,45 @@ export default class SoloSidianPlugin extends Plugin {
     const corridors = dungeon.corridors.map(([from, to]) => `- [[${from}]] ↔ [[${to}]]`).join("\n");
     await this.app.vault.create(path, `---\ntype: dungeon\nid: rpg-dungeon-${safeSeed.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}\nseed: ${JSON.stringify(safeSeed)}\nwidth: ${dungeon.width}\nheight: ${dungeon.height}\n---\n\n# ${safeName}\n\n## Räume\n${rooms}\n\n## Verbindungen\n${corridors}\n`);
     new Notice(`Dungeon '${safeName}' erstellt.`);
+  }
+
+  async createFamilyTree(): Promise<void> {
+    const people = this.app.vault.getMarkdownFiles().filter((file) => this.app.metadataCache.getFileCache(file)?.frontmatter?.type === "person");
+    const byName = new Map(people.map((file) => [file.basename, file]));
+    const edges: Array<{ parent: string; child: string }> = [];
+    for (const file of people) {
+      const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+      const parents = [frontmatter.mother, frontmatter.father, frontmatter.parents].flatMap((value) => Array.isArray(value) ? value : value ? [value] : []);
+      for (const parent of parents) {
+        const link = String(parent).replace(/^\[\[/, "").replace(/\]\].*$/, "").split("|")[0];
+        const parentFile = byName.get(link.split("/").pop() ?? link);
+        if (parentFile) edges.push({ parent: parentFile.basename, child: file.basename });
+      }
+    }
+    const tree = familyTree(edges);
+    const folder = normalizePath(`${this.settings.rootFolder}/Übersichten`);
+    if (!this.app.vault.getAbstractFileByPath(folder)) await this.app.vault.createFolder(folder);
+    const lines = [...tree.entries()].flatMap(([parent, children]) => children.map((child) => `  ${parent} --> ${child}`));
+    const path = normalizePath(`${folder}/Familienstammbaum.md`);
+    const content = `---\ntype: family-tree\n---\n\n# Familienstammbaum\n\n\`\`\`mermaid\ngraph TD\n${lines.join("\n")}\n\`\`\`\n`;
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing instanceof TFile) await this.app.vault.modify(existing, content); else await this.app.vault.create(path, content);
+    new Notice(`Familienstammbaum mit ${edges.length} Eltern-Kind-Beziehungen aktualisiert.`);
+  }
+
+  async createTimeline(campaign: TFile): Promise<void> {
+    const root = campaign.path.replace(/\/Campaign\.md$/, "");
+    const journalFolder = normalizePath(`${root}/Journal`);
+    const events = this.app.vault.getMarkdownFiles().filter((file) => file.path.startsWith(`${journalFolder}/`)).map((file) => {
+      const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+      return { id: file.path, title: file.basename, order: Date.parse(String(frontmatter.created ?? file.stat.mtime)), text: String(frontmatter.summary ?? "") };
+    });
+    const rows = sortTimeline(events).map((event) => `- **${Number.isFinite(event.order) ? new Date(event.order).toISOString() : event.order}** – ${event.title}: ${event.text}`).join("\n");
+    const path = normalizePath(`${root}/Timeline.md`);
+    const content = `---\ntype: timeline\ncampaign: "[[${campaign.basename}]]"\n---\n\n# ${campaign.basename} – Timeline\n\n${rows || "Noch keine Ereignisse."}\n`;
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing instanceof TFile) await this.app.vault.modify(existing, content); else await this.app.vault.create(path, content);
+    new Notice(`Timeline für ${campaign.basename} aktualisiert.`);
   }
 
   async createJournalEntry(campaign: TFile, text: string): Promise<void> {
@@ -991,6 +1033,26 @@ class DungeonModal extends Modal {
     new Setting(this.contentEl).setName("Seed").addText((text) => text.setValue(seed).onChange((value) => { seed = value; }));
     new Setting(this.contentEl).addButton((button) => button.setButtonText("Generieren").setCta().onClick(async () => {
       try { await this.plugin.createDungeon(name, seed); this.close(); } catch (error) { new Notice(error instanceof Error ? error.message : "Dungeon konnte nicht erstellt werden."); }
+    }));
+  }
+  onClose(): void { this.contentEl.empty(); }
+}
+
+class TimelineModal extends Modal {
+  private plugin: SoloSidianPlugin;
+  constructor(app: App, plugin: SoloSidianPlugin) { super(app); this.plugin = plugin; }
+  onOpen(): void {
+    this.contentEl.createEl("h2", { text: "Kampagnen-Timeline" });
+    const campaigns = this.app.vault.getMarkdownFiles().filter((file) => this.app.metadataCache.getFileCache(file)?.frontmatter?.type === "campaign");
+    let campaign: TFile | null = campaigns[0] ?? null;
+    new Setting(this.contentEl).setName("Kampagne").addDropdown((dropdown) => {
+      campaigns.forEach((file) => dropdown.addOption(file.path, file.basename));
+      dropdown.setValue(campaign?.path ?? "").onChange((value) => { campaign = campaigns.find((file) => file.path === value) ?? null; });
+    });
+    new Setting(this.contentEl).addButton((button) => button.setButtonText("Aktualisieren").setCta().onClick(async () => {
+      if (!campaign) { new Notice("Lege zuerst eine Kampagne an."); return; }
+      await this.plugin.createTimeline(campaign);
+      this.close();
     }));
   }
   onClose(): void { this.contentEl.empty(); }
