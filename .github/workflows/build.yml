@@ -25,7 +25,5 @@ jobs:
         run: cd dist && zip -r ../solosidian-plugin.zip main.js manifest.json
       - uses: actions/upload-artifact@v4
         with:
-          name: solosidian-${{ github.sha }}
-          path: |
-            dist/
-            solosidian-plugin.zip
+          name: solosidian-plugin-${{ github.sha }}
+          path: solosidian-plugin.zip
