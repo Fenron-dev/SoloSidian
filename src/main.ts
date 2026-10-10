@@ -217,8 +217,9 @@ export default class SoloSidianPlugin extends Plugin {
 
   private readRoleEntries(file: TFile, frontmatter: Record<string, unknown>): Map<string, RoleEntry> {
     const entries = new Map<string, RoleEntry>();
+    const canOwnResidents = ["person", "household", "settlement"].includes(String(frontmatter.type));
     for (const property of RELATIONSHIP_PROPERTIES) {
-      if (property === "residents" && !["person", "household", "settlement"].includes(String(frontmatter.type))) continue;
+      if (property === "residents" && !canOwnResidents) continue;
       const role = PROPERTY_ROLES[property];
       for (const value of this.asList(frontmatter[property])) {
         const target = this.resolveEntityFromValue(value);
@@ -237,7 +238,7 @@ export default class SoloSidianPlugin extends Plugin {
     if (Array.isArray(raw)) {
       for (const value of raw) {
         const entry = this.parseLegacyRelationshipEntry(value, file);
-        if (entry) entries.set(entry.id, entry);
+        if (entry && (entry.role !== "resident" || canOwnResidents)) entries.set(entry.id, entry);
       }
     }
     return entries;
@@ -317,6 +318,7 @@ export default class SoloSidianPlugin extends Plugin {
     for (const property of RELATIONSHIP_PROPERTIES) delete frontmatter[property];
     const grouped = new Map<string, string[]>();
     for (const entry of entries.values()) {
+      if (entry.role === "resident" && owner && !["person", "household", "settlement"].includes(String(this.app.metadataCache.getFileCache(owner)?.frontmatter?.type))) continue;
       const target = this.resolveEntity(entry.id);
       if (!target) continue;
       const property = this.propertyForEntry(entry.role, owner, target);
