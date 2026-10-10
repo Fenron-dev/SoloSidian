@@ -28,6 +28,9 @@ Der erste Prototyp konzentriert sich auf:
 - validierbare Erweiterungspakete mit Abhängigkeiten,
 - Timeline-/Stammbaum-Hilfen sowie deterministische Dungeon- und Battlemap-Grundlagen,
 - einen Dungeon-Generator über das Dashboard-Kommando.
+- deterministische Regionen für größere Weltkarten,
+- verwaltbare Audio-Cues ohne verpflichtende externe Dateien,
+- einen lokalen KI-Vorschlagsanbieter als sichere Offline-Option.
 
 ## Erster Testablauf
 

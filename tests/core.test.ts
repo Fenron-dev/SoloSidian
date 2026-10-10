@@ -16,6 +16,9 @@ import { generateDungeon } from "../src/core/dungeon.ts";
 import { createBattleMap, reveal } from "../src/core/battlemap.ts";
 import { importMarkdown } from "../src/core/importer.ts";
 import { decideRelationshipSync } from "../src/core/relationship-sync.ts";
+import { generateRegion } from "../src/core/region.ts";
+import { AudioLibrary } from "../src/core/audio.ts";
+import { OfflineAiProvider } from "../src/core/ai.ts";
 
 test("dice rolls are bounded and reproducible with an injected random source", () => {
   const result = rollDice("2d6+1", () => 0.5);
@@ -105,4 +108,15 @@ test("relationship bot remains idempotent across repeated metadata events", () =
   assert.deepEqual(stable, { writeSource: false, writeTarget: false, reason: "stable" });
   const repeated = Array.from({ length: 20 }, () => decideRelationshipSync(state, state, "friend"));
   assert.equal(repeated.filter((decision) => decision.writeSource || decision.writeTarget).length, 0);
+});
+
+test("region, audio and offline AI extensions stay bounded and credential-free", async () => {
+  const region = generateRegion("region-seed", "Nordmark", 3, ["Eichenfurt"]);
+  assert.equal(region.cells.length, 37);
+  const audio = new AudioLibrary();
+  audio.register({ id: "ambience", label: "Ambiente", volume: 0.5, enabled: true });
+  assert.equal(audio.list().length, 1);
+  const suggestion = await new OfflineAiProvider().suggest("eine verlassene Mine");
+  assert.equal(suggestion.source, "offline");
+  assert.match(suggestion.text, /verlassene Mine/);
 });
