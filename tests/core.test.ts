@@ -15,6 +15,7 @@ import { familyTree, sortTimeline } from "../src/core/timeline.ts";
 import { generateDungeon } from "../src/core/dungeon.ts";
 import { createBattleMap, reveal } from "../src/core/battlemap.ts";
 import { importMarkdown } from "../src/core/importer.ts";
+import { decideRelationshipSync } from "../src/core/relationship-sync.ts";
 
 test("dice rolls are bounded and reproducible with an injected random source", () => {
   const result = rollDice("2d6+1", () => 0.5);
@@ -93,4 +94,15 @@ test("dungeon, battlemap and markdown import provide safe foundations", () => {
   const map = reveal(createBattleMap(4, 4), 1, 1, 1);
   assert.equal(map.fog[1][1], false);
   assert.deepEqual(importMarkdown("x.md", "---\ntype: person\nname: Ada\n---\nText").frontmatter, { type: "person", name: "Ada" });
+});
+
+test("relationship bot remains idempotent across repeated metadata events", () => {
+  const state = { source: "a", target: "b", role: "friend", reciprocalRole: "friend" };
+  const first = decideRelationshipSync(state, undefined, undefined);
+  assert.equal(first.writeSource, true);
+  assert.equal(first.writeTarget, true);
+  const stable = decideRelationshipSync(state, state, "friend");
+  assert.deepEqual(stable, { writeSource: false, writeTarget: false, reason: "stable" });
+  const repeated = Array.from({ length: 20 }, () => decideRelationshipSync(state, state, "friend"));
+  assert.equal(repeated.filter((decision) => decision.writeSource || decision.writeTarget).length, 0);
 });
