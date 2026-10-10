@@ -9,6 +9,7 @@ Der erste Prototyp konzentriert sich auf:
 - Haushalte, Familien, NPCs, POIs und Beziehungen,
 - eine Beziehungspflege über eine Obsidian-Ansicht,
 - synchronisierte Beziehungen auch bei direkten YAML-Änderungen,
+- Obsidian-kompatible Beziehungen als einfache Property-Liste mit automatischer Migration älterer YAML-Objektlisten,
 - eine lokale Datenintegritätsprüfung für Entitäten und Beziehungen,
 - ein Dashboard als Einstiegspunkt für Generierung, Beziehungen und Prüfungen,
 - unabhängige Kampagnen mit eigenem Journal,

@@ -1,7 +1,7 @@
 {
   "id": "solosidian",
   "name": "SoloSidian",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "minAppVersion": "1.5.0",
   "description": "Offline-first solo RPG and worldbuilding tools for Obsidian.",
   "author": "SoloSidian",

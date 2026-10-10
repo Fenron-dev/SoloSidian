@@ -36,9 +36,14 @@ export function validateEntities(files: ValidationFile[]): ValidationIssue[] {
   for (const file of files) {
     const raw = file.frontmatter?.relationships;
     if (!Array.isArray(raw)) continue;
-    for (const relationship of raw as Array<{ id?: unknown }>) {
-      if (typeof relationship?.id === "string" && !ids.has(relationship.id) && !files.some((candidate) => candidate.path === relationship.id)) {
-        issues.push({ path: file.path, message: `Beziehung verweist auf '${relationship.id}', diese Entität fehlt.` });
+    for (const relationship of raw) {
+      const targetId = typeof relationship === "string"
+        ? relationship.split("::", 2)[1]
+        : relationship && typeof relationship === "object" && typeof (relationship as { id?: unknown }).id === "string"
+          ? (relationship as { id: string }).id
+          : undefined;
+      if (targetId && !ids.has(targetId) && !files.some((candidate) => candidate.path === targetId)) {
+        issues.push({ path: file.path, message: `Beziehung verweist auf '${targetId}', diese Entität fehlt.` });
       }
     }
   }

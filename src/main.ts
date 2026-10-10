@@ -12,6 +12,7 @@ interface SoloSidianSettings {
 const DEFAULT_SETTINGS: SoloSidianSettings = { rootFolder: "RPG" };
 const DASHBOARD_VIEW_TYPE = "solosidian-dashboard";
 type RelationshipEntry = { id: string; type: RelationshipType };
+const RELATIONSHIP_SEPARATOR = "::";
 
 const RECIPROCAL_TYPES: Record<RelationshipType, RelationshipType> = {
   "parent-child": "parent-child",
@@ -42,7 +43,10 @@ export default class SoloSidianPlugin extends Plugin {
     this.addRibbonIcon("network", "SoloSidian: Siedlung generieren", () => new SettlementModal(this.app, this).open());
     this.addRibbonIcon("home", "SoloSidian: Dashboard öffnen", () => { void this.activateDashboard(); });
     this.registerEvent(this.app.metadataCache.on("changed", (file) => { void this.reconcileRelationshipFile(file); }));
-    this.app.workspace.onLayoutReady(() => this.captureRelationshipSnapshot());
+    this.app.workspace.onLayoutReady(() => {
+      this.captureRelationshipSnapshot();
+      void this.migrateRelationshipProperties();
+    });
   }
 
   async loadSettings(): Promise<void> { this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData()); }
@@ -130,7 +134,9 @@ export default class SoloSidianPlugin extends Plugin {
     for (const [id, entries] of generatedRelationships) {
       const file = entityFiles.get(id);
       if (!file || this.app.metadataCache.getFileCache(file)?.frontmatter?.relationships) continue;
-      await this.app.fileManager.processFrontMatter(file, (frontmatter) => { frontmatter.relationships = entries; });
+      await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+        frontmatter.relationships = entries.map((entry) => this.serializeRelationshipEntry(entry));
+      });
     }
     const indexPath = normalizePath(`${root}/State/Beziehungen.md`);
     const names = new Map(entities.map((entity) => [entity.id, entity.name]));
@@ -149,6 +155,17 @@ export default class SoloSidianPlugin extends Plugin {
     for (const file of this.app.vault.getMarkdownFiles()) this.relationshipSnapshot.set(file.path, this.readRelationshipEntries(file));
   }
 
+  private async migrateRelationshipProperties(): Promise<void> {
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      const raw = this.app.metadataCache.getFileCache(file)?.frontmatter?.relationships;
+      if (!Array.isArray(raw) || !raw.some((entry) => typeof entry === "object" && entry !== null)) continue;
+      const entries = raw.map((entry) => this.parseRelationshipEntry(entry)).filter((entry): entry is RelationshipEntry => entry !== null);
+      await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+        frontmatter.relationships = entries.map((entry) => this.serializeRelationshipEntry(entry));
+      });
+    }
+  }
+
   private entityId(file: TFile): string {
     const id = this.app.metadataCache.getFileCache(file)?.frontmatter?.id;
     return typeof id === "string" ? id : file.path;
@@ -158,10 +175,34 @@ export default class SoloSidianPlugin extends Plugin {
     const raw = this.app.metadataCache.getFileCache(file)?.frontmatter?.relationships;
     const entries = new Map<string, RelationshipType>();
     if (!Array.isArray(raw)) return entries;
-    for (const value of raw as RelationshipEntry[]) {
-      if (value && typeof value.id === "string" && value.type in RECIPROCAL_TYPES) entries.set(value.id, value.type);
+    for (const value of raw) {
+      const entry = this.parseRelationshipEntry(value);
+      if (entry) entries.set(entry.id, entry.type);
     }
     return entries;
+  }
+
+  private parseRelationshipEntry(value: unknown): RelationshipEntry | null {
+    if (typeof value === "string") {
+      const separator = value.indexOf(RELATIONSHIP_SEPARATOR);
+      if (separator > 0) {
+        const type = value.slice(0, separator);
+        const id = value.slice(separator + RELATIONSHIP_SEPARATOR.length);
+        if (id && type in RECIPROCAL_TYPES) return { id, type: type as RelationshipType };
+      }
+      return null;
+    }
+    if (value && typeof value === "object") {
+      const candidate = value as Partial<RelationshipEntry>;
+      if (typeof candidate.id === "string" && typeof candidate.type === "string" && candidate.type in RECIPROCAL_TYPES) {
+        return { id: candidate.id, type: candidate.type as RelationshipType };
+      }
+    }
+    return null;
+  }
+
+  private serializeRelationshipEntry(entry: RelationshipEntry): string {
+    return `${entry.type}${RELATIONSHIP_SEPARATOR}${entry.id}`;
   }
 
   private resolveEntity(reference: string): TFile | null {
@@ -202,9 +243,13 @@ export default class SoloSidianPlugin extends Plugin {
   private async setRelationshipEntry(file: TFile, target: TFile, type: RelationshipType, remove: boolean): Promise<void> {
     const targetId = this.entityId(target);
     await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-      const existing = Array.isArray(frontmatter.relationships) ? frontmatter.relationships as RelationshipEntry[] : [];
-      const filtered = existing.filter((entry) => entry?.id !== targetId && entry?.id !== target.path);
-      if (!remove) filtered.push({ id: targetId, type });
+      const existing: unknown[] = Array.isArray(frontmatter.relationships) ? frontmatter.relationships : [];
+      const filtered = existing
+        .map((entry) => this.parseRelationshipEntry(entry))
+        .filter((entry): entry is RelationshipEntry => entry !== null)
+        .filter((entry) => entry.id !== targetId && entry.id !== target.path)
+        .map((entry) => this.serializeRelationshipEntry(entry));
+      if (!remove) filtered.push(this.serializeRelationshipEntry({ id: targetId, type }));
       frontmatter.relationships = filtered;
     });
   }
