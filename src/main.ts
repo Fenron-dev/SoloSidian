@@ -194,7 +194,8 @@ export default class SoloSidianPlugin extends Plugin {
       if (!frontmatter) continue;
       const entries = this.readRoleEntries(file, frontmatter);
       const inferredGender = frontmatter.type === "person" && typeof frontmatter.gender !== "string" ? this.inferGender(frontmatter.name) : null;
-      if (entries.size === 0 && !Array.isArray(frontmatter.relationships) && !inferredGender) continue;
+      const invalidResidents = !["person", "household", "settlement"].includes(String(frontmatter.type)) && frontmatter.residents !== undefined;
+      if (entries.size === 0 && !Array.isArray(frontmatter.relationships) && !inferredGender && !invalidResidents) continue;
       this.relationshipTypeCache.set(file.path, new Map([...entries].map(([id, entry]) => [id, entry.role])));
       await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
         if (inferredGender) frontmatter.gender = inferredGender;
@@ -217,16 +218,19 @@ export default class SoloSidianPlugin extends Plugin {
   private readRoleEntries(file: TFile, frontmatter: Record<string, unknown>): Map<string, RoleEntry> {
     const entries = new Map<string, RoleEntry>();
     for (const property of RELATIONSHIP_PROPERTIES) {
+      if (property === "residents" && !["person", "household", "settlement"].includes(String(frontmatter.type))) continue;
       const role = PROPERTY_ROLES[property];
       for (const value of this.asList(frontmatter[property])) {
         const target = this.resolveEntityFromValue(value);
         if (target) entries.set(this.entityId(target), { id: this.entityId(target), role });
       }
     }
-    for (const property of ["household", "settlement"]) {
-      for (const value of this.asList(frontmatter[property])) {
-        const target = this.resolveEntityFromValue(value);
-        if (target) entries.set(this.entityId(target), { id: this.entityId(target), role: "resident" });
+    if (frontmatter.type === "person") {
+      for (const property of ["household", "settlement"]) {
+        for (const value of this.asList(frontmatter[property])) {
+          const target = this.resolveEntityFromValue(value);
+          if (target) entries.set(this.entityId(target), { id: this.entityId(target), role: "resident" });
+        }
       }
     }
     const raw = frontmatter.relationships;
