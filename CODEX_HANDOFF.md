@@ -11,7 +11,7 @@ Der lokale Test-Vault liegt in `Beispielvault/`. Dieser Ordner ist absichtlich i
 ## Aktueller Stand
 
 - Aktueller Commit: `93dc69a` (`fix: guard resident migration for unsupported entities`)
-- Plugin-Version: `0.2.6`
+- Plugin-Version des letzten öffentlichen Stands: `0.2.6`; der lokale Entwicklungsstand wird als `0.2.7` veröffentlicht.
 - Letzter erfolgreicher Build: GitHub Actions Run `38071453616`
 - Build-Link: `https://github.com/Fenron-dev/SoloSidian/actions/runs/38071453616`
 - Artefakt enthält `main.js` und `manifest.json` und wurde in `Beispielvault/.obsidian/plugins/solosidian/` kopiert.
@@ -96,7 +96,7 @@ gh run download <RUN_ID> --repo Fenron-dev/SoloSidian --name solosidian-plugin-<
 
 ## Sinnvolle nächste Aufgabe
 
-1. Mit Version 0.2.6 in Obsidian testen und beobachten, ob Familien-/POI-Dateien nach dem Reload stabil bleiben.
+1. Mit Version 0.2.7 in Obsidian testen und beobachten, ob Familien-/POI-Dateien nach dem Reload stabil bleiben.
 2. Prüfen, ob veraltete Einträge in `settlement.residents` nur einmalig bereinigt werden müssen oder ebenfalls aktiv entfernt werden sollten.
 3. Beziehungssynchronisierung mit echten Änderungen testen: Person ↔ Haushalt/Siedlung sowie Mutter/Vater ↔ Sohn/Tochter.
 4. Erst danach weitere UI- oder Kampagnenfunktionen ausbauen.
@@ -104,3 +104,7 @@ gh run download <RUN_ID> --repo Fenron-dev/SoloSidian --name solosidian-plugin-<
 ## Startprompt für eine neue Codex-Sitzung
 
 > Arbeite im SoloSidian-Projekt. Lies zuerst `CODEX_HANDOFF.md`, `README.md` und `Konzept/Entscheidungen-2026-10-10.md`. Halte dich daran, dass Builds ausschließlich über GitHub Actions laufen und der ignorierte `Beispielvault` nach jedem erfolgreichen Build aktualisiert wird. Prüfe zuerst den aktuellen Stand und teste anschließend die Beziehungssynchronisierung, besonders `residents` bei Familien, POIs, Haushalten und Siedlungen. Ändere nur nach nachvollziehbarer Prüfung und dokumentiere Build sowie Teststatus auf Deutsch.
+
+## Lokale Erweiterungen nach dem Handoff
+
+Der lokale Entwicklungsstand ergänzt die erste spielbare Session um Orakel, Zufallstabellen, Spielercharakter-Zuordnung, Kampagnenzustand, NPC-Interaktionen, ein Standard-Regelprofil für Proben sowie eine kleine Hexmap mit Bewegung und Positionsspeicherung. Beziehung-Wikilinks werden innerhalb des Welt-/Kampagnenscopes aufgelöst und mit Pfadreferenz geschrieben, damit gleichnamige Entitäten getrennt bleiben. Direkte widersprüchliche YAML-Beziehungsänderungen öffnen vor der Gegenbeziehungssynchronisierung einen Auswahl-Dialog. `npm run typecheck` und `npm test` laufen erfolgreich; der Produktions-Build bleibt dem GitHub-Workflow vorbehalten.

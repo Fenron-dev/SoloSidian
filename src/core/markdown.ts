@@ -1,4 +1,4 @@
-import type { GeneratedEntity, RelationshipRecord } from "./types";
+import type { GeneratedEntity, RelationshipRecord } from "./types.ts";
 
 function yamlValue(value: string | string[]): string {
   if (Array.isArray(value)) return `[${value.map((item) => JSON.stringify(item)).join(", ")}]`;

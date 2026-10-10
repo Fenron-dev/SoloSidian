@@ -1,5 +1,5 @@
-import { stableId, relationshipId } from "./ids";
-import type { GeneratedEntity, GeneratedSettlement, RelationshipRecord } from "./types";
+import { stableId, relationshipId } from "./ids.ts";
+import type { GeneratedEntity, GeneratedSettlement, RelationshipRecord } from "./types.ts";
 
 const firstNames = [
   { name: "Mara", gender: "female" }, { name: "Jorin", gender: "male" }, { name: "Lio", gender: "male" },

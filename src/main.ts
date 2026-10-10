@@ -1,9 +1,12 @@
 import { App, ItemView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
-import { entityMarkdown, relationshipsMarkdown } from "./core/markdown";
-import { generateSettlement } from "./core/settlement-generator";
-import type { RelationshipType } from "./core/types";
-import { validateEntities } from "./core/validator";
-import { rollDice } from "./core/dice";
+import { entityMarkdown, relationshipsMarkdown } from "./core/markdown.ts";
+import { generateSettlement } from "./core/settlement-generator.ts";
+import type { RelationshipType } from "./core/types.ts";
+import { validateEntities } from "./core/validator.ts";
+import { rollDice } from "./core/dice.ts";
+import { askOracle, oracleCategories, randomEvent } from "./core/oracle.ts";
+import { performCheck, STANDARD_RULESET, type CheckResult } from "./core/rules.ts";
+import { generateHexMap, hexKey, moveHex, type HexDirection, type HexCell } from "./core/map.ts";
 
 interface SoloSidianSettings {
   rootFolder: string;
@@ -43,6 +46,7 @@ export default class SoloSidianPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    this.log("Plugin geladen");
     this.addSettingTab(new SoloSidianSettingTab(this.app, this));
     this.registerView(DASHBOARD_VIEW_TYPE, (leaf) => new DashboardView(leaf, this));
     this.addCommand({ id: "generate-settlement", name: "Siedlung generieren", callback: () => new SettlementModal(this.app, this).open() });
@@ -52,6 +56,11 @@ export default class SoloSidianPlugin extends Plugin {
     this.addCommand({ id: "create-campaign", name: "Kampagne anlegen", callback: () => new CampaignModal(this.app, this).open() });
     this.addCommand({ id: "create-journal-entry", name: "Journal-Eintrag anlegen", callback: () => new JournalModal(this.app, this).open() });
     this.addCommand({ id: "roll-dice", name: "Würfel werfen", callback: () => new DiceModal(this.app).open() });
+    this.addCommand({ id: "ask-oracle", name: "Orakel fragen", callback: () => new OracleModal(this.app, this).open() });
+    this.addCommand({ id: "npc-interaction", name: "NPC-Interaktion dokumentieren", callback: () => new InteractionModal(this.app, this).open() });
+    this.addCommand({ id: "edit-campaign-state", name: "Kampagnenzustand bearbeiten", callback: () => new CampaignStateModal(this.app, this).open() });
+    this.addCommand({ id: "run-check", name: "Probe durchführen", callback: () => new CheckModal(this.app, this).open() });
+    this.addCommand({ id: "explore-map", name: "Karte erkunden", callback: () => new MapModal(this.app, this).open() });
     this.addRibbonIcon("network", "SoloSidian: Siedlung generieren", () => new SettlementModal(this.app, this).open());
     this.addRibbonIcon("home", "SoloSidian: Dashboard öffnen", () => { void this.activateDashboard(); });
     this.registerEvent(this.app.metadataCache.on("changed", (file) => { void this.reconcileRelationshipFile(file); }));
@@ -61,6 +70,14 @@ export default class SoloSidianPlugin extends Plugin {
   async loadSettings(): Promise<void> { this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData()); }
   async saveSettings(): Promise<void> { await this.saveData(this.settings); }
 
+  private log(message: string): void {
+    console.debug(`[SoloSidian] ${message}`);
+  }
+
+  private wikilink(file: TFile): string {
+    return `"[[${normalizePath(file.path).replace(/\.md$/, "")}|${file.basename}]]"`;
+  }
+
   async activateDashboard(): Promise<void> {
     const existing = this.app.workspace.getLeavesOfType(DASHBOARD_VIEW_TYPE)[0];
     const leaf = existing ?? this.app.workspace.getRightLeaf(false);
@@ -69,17 +86,32 @@ export default class SoloSidianPlugin extends Plugin {
     await this.app.workspace.revealLeaf(leaf);
   }
 
-  async createCampaign(name: string, world: TFile | null): Promise<void> {
+  async createCampaign(name: string, world: TFile | null, character: TFile | null = null): Promise<void> {
     const safeName = name.trim().replace(/[\\/:*?"<>|]/g, "-") || "Meine Kampagne";
     const root = normalizePath(`${this.settings.rootFolder}/Campaigns/${safeName}`);
-    for (const directory of [root, `${root}/Journal`, `${root}/State`]) {
+    for (const directory of [root, `${root}/Journal`, `${root}/State`, `${root}/Rulesets`]) {
       if (!this.app.vault.getAbstractFileByPath(directory)) await this.app.vault.createFolder(directory);
     }
     const id = `rpg-campaign-${safeName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
-    const worldLink = world ? `"[[${world.basename}]]"` : "null";
+    const worldLink = world ? this.wikilink(world) : "null";
+    const characterLink = character ? this.wikilink(character) : "null";
     const path = normalizePath(`${root}/Campaign.md`);
     if (!this.app.vault.getAbstractFileByPath(path)) {
-      await this.app.vault.create(path, `---\nid: ${id}\ntype: campaign\nname: ${JSON.stringify(safeName)}\nsummary: ${JSON.stringify(`Unabhängige Solo-Kampagne ${safeName}.`)}\nworld: ${worldLink}\nstatus: active\n---\n\n# ${safeName}\n\nDiese Kampagne besitzt einen eigenen Spielstand. Änderungen bleiben auf diese Kampagne begrenzt.\n\n## Journal\n\n`);
+      await this.app.vault.create(path, `---\nid: ${id}\ntype: campaign\nname: ${JSON.stringify(safeName)}\nsummary: ${JSON.stringify(`Unabhängige Solo-Kampagne ${safeName}.`)}\nworld: ${worldLink}\ncharacter: ${characterLink}\nstatus: active\nturn: 0\n---\n\n# ${safeName}\n\nDiese Kampagne besitzt einen eigenen Spielstand. Änderungen bleiben auf diese Kampagne begrenzt.\n\n## Journal\n\n`);
+    }
+    const statePath = normalizePath(`${root}/State/Spielstand.md`);
+    if (!this.app.vault.getAbstractFileByPath(statePath)) {
+      await this.app.vault.create(statePath, `---\ntype: campaign-state\ncampaign: "[[Campaign]]"\ncharacter: ${characterLink}\nturn: 0\nposition: "0,0"\nlocation: null\nhit-points: null\nconditions: []\nresources: []\n---\n\n# Spielstand\n\nDer Zustand dieser Kampagne wird unabhängig von anderen Kampagnen gespeichert.\n`);
+    }
+    const rulesetPath = normalizePath(`${root}/Rulesets/${STANDARD_RULESET.id}.md`);
+    if (!this.app.vault.getAbstractFileByPath(rulesetPath)) {
+      await this.app.vault.create(rulesetPath, `---\ntype: ruleset\nid: ${STANDARD_RULESET.id}\nname: ${JSON.stringify(STANDARD_RULESET.name)}\ndice: ${STANDARD_RULESET.dice}\nsuccess-label: ${JSON.stringify(STANDARD_RULESET.successLabel)}\n---\n\n# ${STANDARD_RULESET.name}\n\nEine Probe addiert Attributwert, Ausrüstungsbonus und Würfelergebnis und vergleicht die Summe mit der Schwierigkeit.\n`);
+    }
+    const mapPath = normalizePath(`${root}/State/Karte.md`);
+    if (!this.app.vault.getAbstractFileByPath(mapPath)) {
+      const pois = world ? this.app.vault.getMarkdownFiles().filter((file) => file.path.startsWith(`${world.path.replace(/\/World\.md$/, "")}/POIs/`)).map((file) => file.basename) : [];
+      const cells = generateHexMap(`${safeName}-map`, 2, pois);
+      await this.app.vault.create(mapPath, this.mapMarkdown(cells, safeName));
     }
     new Notice(`Kampagne „${safeName}“ wurde angelegt.`);
   }
@@ -90,9 +122,102 @@ export default class SoloSidianPlugin extends Plugin {
     const campaignRoot = campaign.path.replace(/\/Campaign\.md$/, "");
     const journalFolder = normalizePath(`${campaignRoot}/Journal`);
     if (!this.app.vault.getAbstractFileByPath(journalFolder)) await this.app.vault.createFolder(journalFolder);
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    await this.app.vault.create(normalizePath(`${journalFolder}/${stamp}.md`), `---\ntype: journal\ncampaign: "[[${campaign.basename}]]"\ncreated: ${new Date().toISOString()}\nsummary: ${JSON.stringify(content.slice(0, 120))}\n---\n\n# ${stamp}\n\n${content}\n`);
+    const created = new Date().toISOString();
+    const baseStamp = created.replace(/[:.]/g, "-");
+    let stamp = baseStamp;
+    let sequence = 2;
+    while (this.app.vault.getAbstractFileByPath(normalizePath(`${journalFolder}/${stamp}.md`))) stamp = `${baseStamp}-${sequence++}`;
+    await this.app.vault.create(normalizePath(`${journalFolder}/${stamp}.md`), `---\ntype: journal\ncampaign: "[[${campaign.basename}]]"\ncreated: ${created}\nsummary: ${JSON.stringify(content.slice(0, 120))}\n---\n\n# ${stamp}\n\n${content}\n`);
+    await this.advanceCampaignTurn(campaign);
     new Notice(`Journal-Eintrag in ${campaign.basename} gespeichert.`);
+  }
+
+  async recordInteraction(campaign: TFile, npc: TFile, action: string, outcome: string): Promise<void> {
+    const actor = this.campaignCharacter(campaign);
+    const actorName = actor?.basename ?? "Die Spielfigur";
+    const cleanAction = action.trim();
+    const cleanOutcome = outcome.trim() || "Keine unmittelbare Reaktion festgelegt.";
+    if (!cleanAction) { new Notice("Beschreibe zuerst die Aktion."); return; }
+    await this.createJournalEntry(campaign, `## Interaktion: ${actorName} und ${npc.basename}\n\n**Aktion:** ${cleanAction}\n\n**Reaktion:** ${cleanOutcome}\n\nBeteiligte: [[${actorName}]], [[${npc.basename}]]`);
+  }
+
+  async askOracle(question: string): Promise<string> {
+    const result = askOracle(question);
+    return `${result.answer} (Wurf ${result.roll}/5)`;
+  }
+
+  async performCampaignCheck(campaign: TFile, action: string, attribute: string, equipmentBonus: string, difficulty: string): Promise<CheckResult | null> {
+    const parsed = [attribute, equipmentBonus, difficulty].map((value) => Number(value.trim()));
+    try {
+      const result = performCheck({ action, attribute: parsed[0], equipmentBonus: parsed[1], difficulty: parsed[2] });
+      const outcome = `${result.success ? result.ruleset.successLabel : "Kein Erfolg"}: ${result.total} gegen Schwierigkeit ${result.difficulty}. Wurf ${result.dice.expression} (${result.dice.rolls.join(", ")}) + Attribut ${result.attribute} + Ausrüstung ${result.equipmentBonus}.`;
+      await this.createJournalEntry(campaign, `## Probe: ${result.action}\n\n${outcome}`);
+      return result;
+    } catch (error) {
+      new Notice(error instanceof Error ? error.message : "Die Probe konnte nicht durchgeführt werden.");
+      return null;
+    }
+  }
+
+  private mapMarkdown(cells: HexCell[], campaignName: string): string {
+    const rows = cells.map((cell) => `| ${hexKey(cell)} | ${cell.terrain} | ${cell.poi ? `[[${cell.poi}]]` : "–"} |`).join("\n");
+    return `---\ntype: campaign-map\ncampaign: "[[Campaign]]"\nname: ${JSON.stringify(`${campaignName} Karte`)}\n---\n\n# ${campaignName} – Karte\n\n| Hex | Gelände | POI |\n| --- | --- | --- |\n${rows}\n`;
+  }
+
+  async moveCampaign(campaign: TFile, direction: HexDirection): Promise<string | null> {
+    const root = campaign.path.replace(/\/Campaign\.md$/, "");
+    const statePath = normalizePath(`${root}/State/Spielstand.md`);
+    const mapPath = normalizePath(`${root}/State/Karte.md`);
+    const state = this.app.vault.getAbstractFileByPath(statePath);
+    const map = this.app.vault.getAbstractFileByPath(mapPath);
+    if (!(state instanceof TFile) || !(map instanceof TFile)) return null;
+    const currentPosition = this.app.metadataCache.getFileCache(state)?.frontmatter?.position;
+    const nextPosition = moveHex(typeof currentPosition === "string" ? currentPosition : "0,0", direction);
+    const mapContent = await this.app.vault.cachedRead(map);
+    const row = mapContent.split("\n").find((line) => line.startsWith(`| ${nextPosition} |`));
+    if (!row) return "Kartenrand erreicht.";
+    await this.app.fileManager.processFrontMatter(state, (frontmatter) => {
+      frontmatter.position = nextPosition;
+      frontmatter.location = `Hex ${nextPosition}`;
+    });
+    const summary = row ? row.replace(/^\|\s*|\s*\|$/g, "").split("|").map((part) => part.trim()) : [];
+    const destination = summary[1] ? `Hex ${nextPosition}: ${summary[1]}${summary[2] && summary[2] !== "–" ? `, POI ${summary[2]}` : ""}` : `Hex ${nextPosition}`;
+    await this.createJournalEntry(campaign, `## Bewegung\n\nDie Gruppe bewegt sich nach **${direction.toUpperCase()}**.\n\n${destination}`);
+    return destination;
+  }
+
+  async advanceCampaignTurn(campaign: TFile): Promise<void> {
+    const root = campaign.path.replace(/\/Campaign\.md$/, "");
+    const statePath = normalizePath(`${root}/State/Spielstand.md`);
+    const state = this.app.vault.getAbstractFileByPath(statePath);
+    if (!(state instanceof TFile)) return;
+    await this.app.fileManager.processFrontMatter(state, (frontmatter) => {
+      const current = Number(frontmatter.turn);
+      frontmatter.turn = Number.isFinite(current) ? current + 1 : 1;
+    });
+  }
+
+  async updateCampaignState(campaign: TFile, location: string, hitPoints: string, conditions: string, resources: string): Promise<void> {
+    const root = campaign.path.replace(/\/Campaign\.md$/, "");
+    const statePath = normalizePath(`${root}/State/Spielstand.md`);
+    const state = this.app.vault.getAbstractFileByPath(statePath);
+    if (!(state instanceof TFile)) return;
+    await this.app.fileManager.processFrontMatter(state, (frontmatter) => {
+      frontmatter.location = location.trim() ? `[[${location.trim()}]]` : null;
+      const parsedHitPoints = Number(hitPoints.trim());
+      frontmatter["hit-points"] = hitPoints.trim() && Number.isFinite(parsedHitPoints) ? parsedHitPoints : null;
+      frontmatter.conditions = conditions.split(",").map((value) => value.trim()).filter(Boolean);
+      frontmatter.resources = resources.split(",").map((value) => value.trim()).filter(Boolean);
+    });
+    new Notice(`Spielstand für ${campaign.basename} gespeichert.`);
+  }
+
+  campaignCharacter(campaign: TFile): TFile | null {
+    const value = this.app.metadataCache.getFileCache(campaign)?.frontmatter?.character;
+    if (typeof value !== "string") return null;
+    const match = /^\[\[([^|\]]+)/.exec(value);
+    const reference = match?.[1] ?? value;
+    return this.resolveEntity(reference);
   }
 
   validateVault(): void {
@@ -101,6 +226,7 @@ export default class SoloSidianPlugin extends Plugin {
       .filter((file) => file.path.startsWith(`${root}/`))
       .map((file) => ({ path: file.path, frontmatter: this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined }));
     const issues = validateEntities(files);
+    this.log(`Datenintegrität geprüft: ${files.length} Dateien, ${issues.length} Problem(e)`);
     if (issues.length === 0) {
       new Notice(`${files.length} Markdown-Dateien geprüft: Keine Datenintegritätsfehler gefunden.`);
       return;
@@ -127,8 +253,17 @@ export default class SoloSidianPlugin extends Plugin {
     if (!this.app.vault.getAbstractFileByPath(worldPath)) {
       await this.app.vault.create(worldPath, `---\nid: rpg-world-${safeName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}\ntype: world\nname: ${JSON.stringify(safeName)}\nsummary: ${JSON.stringify(`Weltstand für ${safeName}.`)}\nseed: ${JSON.stringify(seed)}\n---\n\n# ${safeName}\n\nDiese Welt wurde mit SoloSidian angelegt.\n`);
     }
+    generated.settlement.frontmatter.world = "[[World]]";
     for (const [entity, path] of paths) {
       if (!this.app.vault.getAbstractFileByPath(normalizePath(path))) await this.app.vault.create(normalizePath(path), entityMarkdown(entity));
+    }
+    const worldFile = this.app.vault.getAbstractFileByPath(worldPath);
+    if (worldFile instanceof TFile) {
+      await this.app.fileManager.processFrontMatter(worldFile, (frontmatter) => {
+        const settlements = Array.isArray(frontmatter.settlements) ? frontmatter.settlements as string[] : [];
+        if (!settlements.includes(`[[${safeName}]]`)) settlements.push(`[[${safeName}]]`);
+        frontmatter.settlements = settlements;
+      });
     }
     const entityFiles = new Map(entities.map((entity, index) => [entity.id, this.app.vault.getAbstractFileByPath(normalizePath(paths[index][1]))]).filter((entry): entry is [string, TFile] => entry[1] instanceof TFile));
     const generatedRelationships = new Map<string, RoleEntry[]>();
@@ -155,9 +290,14 @@ export default class SoloSidianPlugin extends Plugin {
     const basePath = normalizePath(`${root}/NPCs.base`);
     if (!this.app.vault.getAbstractFileByPath(basePath)) await this.app.vault.create(basePath, `views:\n  - type: table\n    name: Bewohner\n    filters:\n      and:\n        - file.inFolder("${root}/NPCs")\n    order:\n      - file.name\n`);
     new Notice(`${entities.length} Entitäten und ${generated.relationships.length} Beziehungen in ${root} erstellt.`);
+    this.log(`Siedlung generiert: ${entities.length} Entitäten`);
   }
 
   async addRelationship(from: TFile, to: TFile, role: RelationshipRole, reciprocalRole?: RelationshipRole): Promise<void> {
+    if (!this.sameRelationshipScope(from, to)) {
+      new Notice("Beziehungen können nur innerhalb derselben Welt oder Kampagne synchronisiert werden.");
+      return;
+    }
     await this.syncRelationshipPair(from, to, role, reciprocalRole ?? this.reciprocalRole(role, from, to));
     new Notice(`Beziehung zwischen ${from.basename} und ${to.basename} gespeichert.`);
   }
@@ -222,14 +362,14 @@ export default class SoloSidianPlugin extends Plugin {
       if (property === "residents" && !canOwnResidents) continue;
       const role = PROPERTY_ROLES[property];
       for (const value of this.asList(frontmatter[property])) {
-        const target = this.resolveEntityFromValue(value);
+        const target = this.resolveEntityFromValue(value, file);
         if (target) entries.set(this.entityId(target), { id: this.entityId(target), role });
       }
     }
     if (frontmatter.type === "person") {
       for (const property of ["household", "settlement"]) {
         for (const value of this.asList(frontmatter[property])) {
-          const target = this.resolveEntityFromValue(value);
+          const target = this.resolveEntityFromValue(value, file);
           if (target) entries.set(this.entityId(target), { id: this.entityId(target), role: "resident" });
         }
       }
@@ -254,11 +394,11 @@ export default class SoloSidianPlugin extends Plugin {
       if (separator > 0) {
         const type = value.slice(0, separator);
         const id = value.slice(separator + RELATIONSHIP_SEPARATOR.length);
-        if (id && type in RECIPROCAL_TYPES) return this.normalizeRoleEntry({ id, role: this.legacyRole(type as RelationshipType) });
+        if (id && type in RECIPROCAL_TYPES) return this.normalizeRoleEntry({ id, role: this.legacyRole(type as RelationshipType) }, file);
       }
       const linkMatch = /^\[\[([^|\]]+)(?:\|[^\]]+)?\]\]$/.exec(value.trim());
       if (linkMatch) {
-        const target = this.resolveEntity(linkMatch[1]);
+        const target = this.resolveEntity(linkMatch[1], file);
         if (!target) return null;
         const targetId = this.entityId(target);
         const role = file ? this.relationshipTypeCache.get(file.path)?.get(targetId) : undefined;
@@ -269,7 +409,7 @@ export default class SoloSidianPlugin extends Plugin {
     if (value && typeof value === "object") {
       const candidate = value as Partial<RelationshipEntry>;
       if (typeof candidate.id === "string" && typeof candidate.type === "string" && candidate.type in RECIPROCAL_TYPES) {
-        return this.normalizeRoleEntry({ id: candidate.id, role: this.legacyRole(candidate.type as RelationshipType) });
+        return this.normalizeRoleEntry({ id: candidate.id, role: this.legacyRole(candidate.type as RelationshipType) }, file);
       }
     }
     return null;
@@ -279,15 +419,16 @@ export default class SoloSidianPlugin extends Plugin {
     return type === "parent-child" ? "parent" : type;
   }
 
-  private normalizeRoleEntry(entry: RoleEntry): RoleEntry {
-    const target = this.resolveEntity(entry.id);
+  private normalizeRoleEntry(entry: RoleEntry, owner?: TFile): RoleEntry {
+    const target = this.resolveEntity(entry.id, owner);
     return target ? { id: this.entityId(target), role: entry.role } : entry;
   }
 
-  private resolveEntityFromValue(value: unknown): TFile | null {
+  private resolveEntityFromValue(value: unknown, owner?: TFile): TFile | null {
     if (typeof value !== "string") return null;
     const linkMatch = /^\[\[([^|\]]+)(?:\|[^\]]+)?\]\]$/.exec(value.trim());
-    return this.resolveEntity(linkMatch ? linkMatch[1] : value);
+    const target = this.resolveEntity(linkMatch ? linkMatch[1] : value, owner);
+    return target && (!owner || this.sameRelationshipScope(owner, target)) ? target : null;
   }
 
   private inferRelationshipRole(target: TFile): RelationshipRole {
@@ -323,7 +464,7 @@ export default class SoloSidianPlugin extends Plugin {
       if (!target) continue;
       const property = this.propertyForEntry(entry.role, owner, target);
       const values = grouped.get(property) ?? [];
-      values.push(`[[${target.basename}]]`);
+      values.push(this.entityLink(target));
       grouped.set(property, values);
     }
     for (const [property, values] of grouped) frontmatter[property] = ["mother", "father", "household", "settlement"].includes(property) ? values[0] : values;
@@ -345,9 +486,28 @@ export default class SoloSidianPlugin extends Plugin {
     });
   }
 
-  private resolveEntity(reference: string): TFile | null {
-    const normalized = reference.replace(/^\[\[/, "").replace(/\]\]$/, "").split("|")[0];
-    return this.app.vault.getMarkdownFiles().find((file) => file.path === reference || this.entityId(file) === reference || file.basename === normalized || file.path.replace(/\.md$/, "") === normalized) ?? null;
+  private entityLink(file: TFile): string {
+    return `[[${normalizePath(file.path).replace(/\.md$/, "")}|${file.basename}]]`;
+  }
+
+  private resolveEntity(reference: string, owner?: TFile): TFile | null {
+    const normalized = normalizePath(reference.replace(/^\[\[/, "").replace(/\]\]$/, "").split("|")[0]);
+    const files = this.app.vault.getMarkdownFiles();
+    const exact = files.find((file) => this.entityId(file) === reference || file.path === reference || file.path.replace(/\.md$/, "") === normalized);
+    if (exact) return exact;
+    const candidates = files.filter((file) => file.basename === normalized || file.path.replace(/\.md$/, "") === normalized);
+    if (!owner) return candidates[0] ?? null;
+    return candidates.find((file) => this.sameRelationshipScope(owner, file)) ?? candidates[0] ?? null;
+  }
+
+  private relationshipScope(file: TFile): string {
+    const normalized = normalizePath(file.path);
+    const match = /(?:^|\/)(worlds|campaigns)\/([^/]+)/i.exec(normalized);
+    return match ? `${match[1].toLowerCase()}/${match[2]}` : "global";
+  }
+
+  private sameRelationshipScope(from: TFile, to: TFile): boolean {
+    return this.relationshipScope(from) === this.relationshipScope(to);
   }
 
   private async reconcileRelationshipFile(file: TFile): Promise<void> {
@@ -357,15 +517,29 @@ export default class SoloSidianPlugin extends Plugin {
     this.relationshipSnapshot.set(file.path, current);
     for (const reference of references) {
       const target = this.resolveEntity(reference);
-      if (!target || target.path === file.path) continue;
+      if (!target || target.path === file.path || !this.sameRelationshipScope(file, target)) continue;
       const nextRole = current.get(reference);
       if (nextRole) {
-        await this.syncRelationshipPair(file, target, nextRole, this.reciprocalRole(nextRole, file, target));
+        const reciprocalRole = this.reciprocalRole(nextRole, file, target);
+        const previousRole = previous.get(reference);
+        const targetRole = this.readRelationshipEntries(target).get(this.entityId(file));
+        const changedRole = previousRole !== undefined && previousRole !== nextRole;
+        const contradictoryTarget = targetRole !== undefined && targetRole !== reciprocalRole;
+        if ((changedRole || contradictoryTarget) && !await this.confirmRelationshipConflict(file, target, previousRole, nextRole, targetRole)) {
+          if (previousRole) await this.syncRelationshipPair(file, target, previousRole, this.reciprocalRole(previousRole, file, target));
+          else await this.syncRelationshipPair(file, target, nextRole, reciprocalRole, true);
+          continue;
+        }
+        await this.syncRelationshipPair(file, target, nextRole, reciprocalRole);
       } else if (previous.has(reference)) {
         const previousRole = previous.get(reference)!;
         await this.syncRelationshipPair(file, target, previousRole, this.reciprocalRole(previousRole, file, target), true);
       }
     }
+  }
+
+  private confirmRelationshipConflict(file: TFile, target: TFile, previousRole: RelationshipRole | undefined, nextRole: RelationshipRole, targetRole: RelationshipRole | undefined): Promise<boolean> {
+    return new Promise((resolve) => new RelationshipConflictModal(this.app, file, target, previousRole, nextRole, targetRole, resolve).open());
   }
 
   private async syncRelationshipPair(from: TFile, to: TFile, role: RelationshipRole, reciprocalRole: RelationshipRole, remove = false): Promise<void> {
@@ -469,6 +643,11 @@ class DashboardView extends ItemView {
     this.addButton(actions, "Kampagne anlegen", () => new CampaignModal(this.app, this.plugin).open());
     this.addButton(actions, "Journal-Eintrag", () => new JournalModal(this.app, this.plugin).open());
     this.addButton(actions, "Würfel werfen", () => new DiceModal(this.app).open());
+    this.addButton(actions, "Orakel fragen", () => new OracleModal(this.app, this.plugin).open());
+    this.addButton(actions, "NPC-Interaktion", () => new InteractionModal(this.app, this.plugin).open());
+    this.addButton(actions, "Spielstand bearbeiten", () => new CampaignStateModal(this.app, this.plugin).open());
+    this.addButton(actions, "Probe durchführen", () => new CheckModal(this.app, this.plugin).open());
+    this.addButton(actions, "Karte erkunden", () => new MapModal(this.app, this.plugin).open());
     this.addButton(actions, "Beziehung anpassen", () => new RelationshipModal(this.app, this.plugin).open());
     this.addButton(actions, "Datenintegrität prüfen", () => this.plugin.validateVault());
     this.contentEl.createEl("h3", { text: "Schnellstart" });
@@ -491,7 +670,11 @@ class DashboardView extends ItemView {
       const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
       if (!frontmatter || frontmatter.type === "relationship-index") continue;
       entities += 1;
-      if (Array.isArray(frontmatter.relationships)) relationships += frontmatter.relationships.length;
+      const relationshipFields = ["relationships", "mother", "father", "parents", "sons", "daughters", "children", "siblings", "partners", "friends", "rivals", "colleagues", "residents"];
+      relationships += relationshipFields.reduce((count, field) => {
+        const value = frontmatter[field];
+        return count + (Array.isArray(value) ? value.length : value === undefined ? 0 : 1);
+      }, 0);
     }
     return { entities, relationships };
   }
@@ -505,15 +688,22 @@ class CampaignModal extends Modal {
     let name = "Meine Erste Kampagne";
     const worlds = this.app.vault.getMarkdownFiles().filter((file) => this.app.metadataCache.getFileCache(file)?.frontmatter?.type === "world");
     let world: TFile | null = worlds[0] ?? null;
+    let character: TFile | null = null;
     new Setting(this.contentEl).setName("Name").addText((text) => text.setValue(name).onChange((value) => { name = value; }));
     new Setting(this.contentEl).setName("Welt (optional)").addDropdown((dropdown) => {
       dropdown.addOption("", "Unabhängig");
       worlds.forEach((file) => dropdown.addOption(file.path, file.basename));
       dropdown.setValue(world?.path ?? "").onChange((value) => { world = worlds.find((file) => file.path === value) ?? null; });
     });
+    const characters = this.app.vault.getMarkdownFiles().filter((file) => this.app.metadataCache.getFileCache(file)?.frontmatter?.type === "person");
+    new Setting(this.contentEl).setName("Spielercharakter (optional)").addDropdown((dropdown) => {
+      dropdown.addOption("", "Später festlegen");
+      characters.forEach((file) => dropdown.addOption(file.path, file.basename));
+      dropdown.setValue("").onChange((value) => { character = characters.find((file) => file.path === value) ?? null; });
+    });
     new Setting(this.contentEl).addButton((button) => button.setButtonText("Anlegen").setCta().onClick(async () => {
       const selectedWorld = world;
-      await this.plugin.createCampaign(name, selectedWorld);
+      await this.plugin.createCampaign(name, selectedWorld, character);
       this.close();
     }));
   }
@@ -554,13 +744,220 @@ class DiceModal extends Modal {
   onClose(): void { this.contentEl.empty(); }
 }
 
+class OracleModal extends Modal {
+  private plugin: SoloSidianPlugin;
+  constructor(app: App, plugin: SoloSidianPlugin) { super(app); this.plugin = plugin; }
+  onOpen(): void {
+    this.contentEl.createEl("h2", { text: "Orakel und Zufallstabelle" });
+    const campaigns = this.app.vault.getMarkdownFiles().filter((file) => this.app.metadataCache.getFileCache(file)?.frontmatter?.type === "campaign");
+    let campaign: TFile | null = campaigns[0] ?? null;
+    let question = "Wird die Spur gefunden?";
+    let category = oracleCategories()[0] ?? "Begegnung";
+    let lastResult = "";
+    const result = this.contentEl.createEl("p", { text: "Bereit." });
+    new Setting(this.contentEl).setName("Kampagne für Journal").addDropdown((dropdown) => {
+      dropdown.addOption("", "Nicht speichern");
+      campaigns.forEach((file) => dropdown.addOption(file.path, file.basename));
+      dropdown.setValue(campaign?.path ?? "").onChange((value) => { campaign = campaigns.find((file) => file.path === value) ?? null; });
+    });
+    new Setting(this.contentEl).setName("Frage").addText((text) => text.setValue(question).onChange((value) => { question = value; }));
+    new Setting(this.contentEl).setName("Zufallstabelle").addDropdown((dropdown) => {
+      oracleCategories().forEach((value) => dropdown.addOption(value, value));
+      dropdown.setValue(category).onChange((value) => { category = value; });
+    });
+    new Setting(this.contentEl).addButton((button) => button.setButtonText("Orakel fragen").setCta().onClick(async () => {
+      lastResult = `Orakel: ${await this.plugin.askOracle(question)}`;
+      result.setText(lastResult);
+    })).addButton((button) => button.setButtonText("Ereignis erzeugen").onClick(() => {
+      const event = randomEvent(category);
+      lastResult = `Zufallsereignis (${event.category}): ${event.text}`;
+      result.setText(lastResult);
+    })).addButton((button) => button.setButtonText("Im Journal speichern").onClick(async () => {
+      if (!campaign) { new Notice("Wähle eine Kampagne zum Speichern aus."); return; }
+      if (!lastResult) { new Notice("Erzeuge zuerst eine Orakelantwort oder ein Ereignis."); return; }
+      await this.plugin.createJournalEntry(campaign, lastResult);
+      result.setText(`${lastResult} — im Journal gespeichert.`);
+    }));
+  }
+  onClose(): void { this.contentEl.empty(); }
+}
+
+class InteractionModal extends Modal {
+  private plugin: SoloSidianPlugin;
+  constructor(app: App, plugin: SoloSidianPlugin) { super(app); this.plugin = plugin; }
+  onOpen(): void {
+    this.contentEl.createEl("h2", { text: "NPC-Interaktion" });
+    const campaigns = this.app.vault.getMarkdownFiles().filter((file) => this.app.metadataCache.getFileCache(file)?.frontmatter?.type === "campaign");
+    const npcs = this.app.vault.getMarkdownFiles().filter((file) => this.app.metadataCache.getFileCache(file)?.frontmatter?.type === "person");
+    let campaign: TFile | null = campaigns[0] ?? null;
+    let npc: TFile | null = npcs[0] ?? null;
+    let action = "";
+    let outcome = "";
+    new Setting(this.contentEl).setName("Kampagne").addDropdown((dropdown) => {
+      campaigns.forEach((file) => dropdown.addOption(file.path, file.basename));
+      dropdown.setValue(campaign?.path ?? "").onChange((value) => { campaign = campaigns.find((file) => file.path === value) ?? null; });
+    });
+    new Setting(this.contentEl).setName("NPC").addDropdown((dropdown) => {
+      npcs.forEach((file) => dropdown.addOption(file.path, file.basename));
+      dropdown.setValue(npc?.path ?? "").onChange((value) => { npc = npcs.find((file) => file.path === value) ?? null; });
+    });
+    new Setting(this.contentEl).setName("Aktion").addTextArea((area) => area.setPlaceholder("Was tut die Spielfigur?").onChange((value) => { action = value; }));
+    new Setting(this.contentEl).setName("Reaktion / Ergebnis").addTextArea((area) => area.setPlaceholder("Ergebnis oder Orakelantwort").onChange((value) => { outcome = value; }));
+    new Setting(this.contentEl).addButton((button) => button.setButtonText("Orakel für Reaktion").onClick(async () => {
+      outcome = await this.plugin.askOracle(`Reagiert ${npc?.basename ?? "der NPC"} positiv auf die Aktion?`);
+      const outcomeField = this.contentEl.querySelectorAll("textarea")[1] as HTMLTextAreaElement | undefined;
+      if (outcomeField) outcomeField.value = outcome;
+    })).addButton((button) => button.setButtonText("Im Journal speichern").setCta().onClick(async () => {
+      const selectedCampaign = campaign;
+      const selectedNpc = npc;
+      if (selectedCampaign && selectedNpc) await this.plugin.recordInteraction(selectedCampaign, selectedNpc, action, outcome);
+      else new Notice("Lege zuerst eine Kampagne und einen NPC an.");
+      this.close();
+    }));
+  }
+  onClose(): void { this.contentEl.empty(); }
+}
+
+class CampaignStateModal extends Modal {
+  private plugin: SoloSidianPlugin;
+  constructor(app: App, plugin: SoloSidianPlugin) { super(app); this.plugin = plugin; }
+  onOpen(): void {
+    this.contentEl.createEl("h2", { text: "Kampagnenzustand bearbeiten" });
+    const campaigns = this.app.vault.getMarkdownFiles().filter((file) => this.app.metadataCache.getFileCache(file)?.frontmatter?.type === "campaign");
+    let campaign: TFile | null = campaigns[0] ?? null;
+    let location = "";
+    let hitPoints = "";
+    let conditions = "";
+    let resources = "";
+    new Setting(this.contentEl).setName("Kampagne").addDropdown((dropdown) => {
+      campaigns.forEach((file) => dropdown.addOption(file.path, file.basename));
+      dropdown.setValue(campaign?.path ?? "").onChange((value) => { campaign = campaigns.find((file) => file.path === value) ?? null; });
+    });
+    new Setting(this.contentEl).setName("Ort").setDesc("Dateiname oder Anzeigename einer Ortsnotiz.").addText((text) => text.onChange((value) => { location = value; }));
+    new Setting(this.contentEl).setName("Trefferpunkte").addText((text) => text.setPlaceholder("z. B. 8").onChange((value) => { hitPoints = value; }));
+    new Setting(this.contentEl).setName("Zustände").setDesc("Kommagetrennte Liste.").addText((text) => text.onChange((value) => { conditions = value; }));
+    new Setting(this.contentEl).setName("Ressourcen").setDesc("Kommagetrennte Liste.").addText((text) => text.onChange((value) => { resources = value; }));
+    new Setting(this.contentEl).addButton((button) => button.setButtonText("Speichern").setCta().onClick(async () => {
+      const selectedCampaign = campaign;
+      if (selectedCampaign) await this.plugin.updateCampaignState(selectedCampaign, location, hitPoints, conditions, resources);
+      else new Notice("Lege zuerst eine Kampagne an.");
+      this.close();
+    }));
+  }
+  onClose(): void { this.contentEl.empty(); }
+}
+
+class CheckModal extends Modal {
+  private plugin: SoloSidianPlugin;
+  constructor(app: App, plugin: SoloSidianPlugin) { super(app); this.plugin = plugin; }
+  onOpen(): void {
+    this.contentEl.createEl("h2", { text: "Probe durchführen" });
+    this.contentEl.createEl("p", { text: "Standardprofil: 1d20 + Attribut + Ausrüstungsbonus gegen Schwierigkeit." });
+    const campaigns = this.app.vault.getMarkdownFiles().filter((file) => this.app.metadataCache.getFileCache(file)?.frontmatter?.type === "campaign");
+    let campaign: TFile | null = campaigns[0] ?? null;
+    let action = "";
+    let attribute = "0";
+    let equipmentBonus = "0";
+    let difficulty = "10";
+    const result = this.contentEl.createEl("p", { text: "Bereit." });
+    new Setting(this.contentEl).setName("Kampagne").addDropdown((dropdown) => {
+      campaigns.forEach((file) => dropdown.addOption(file.path, file.basename));
+      dropdown.setValue(campaign?.path ?? "").onChange((value) => { campaign = campaigns.find((file) => file.path === value) ?? null; });
+    });
+    new Setting(this.contentEl).setName("Aktion").addText((text) => text.setPlaceholder("Eine verschlossene Tür öffnen").onChange((value) => { action = value; }));
+    new Setting(this.contentEl).setName("Attributwert").addText((text) => text.setValue(attribute).onChange((value) => { attribute = value; }));
+    new Setting(this.contentEl).setName("Ausrüstungsbonus").addText((text) => text.setValue(equipmentBonus).onChange((value) => { equipmentBonus = value; }));
+    new Setting(this.contentEl).setName("Schwierigkeit").addText((text) => text.setValue(difficulty).onChange((value) => { difficulty = value; }));
+    new Setting(this.contentEl).addButton((button) => button.setButtonText("Würfeln und speichern").setCta().onClick(async () => {
+      const selectedCampaign = campaign;
+      if (!selectedCampaign) { new Notice("Lege zuerst eine Kampagne an."); return; }
+      const check = await this.plugin.performCampaignCheck(selectedCampaign, action, attribute, equipmentBonus, difficulty);
+      if (check) result.setText(`${check.success ? "Erfolg" : "Kein Erfolg"}: ${check.total} gegen ${check.difficulty} (Wurf ${check.dice.rolls.join(", ")}). Im Journal gespeichert.`);
+    }));
+  }
+  onClose(): void { this.contentEl.empty(); }
+}
+
+class MapModal extends Modal {
+  private plugin: SoloSidianPlugin;
+  constructor(app: App, plugin: SoloSidianPlugin) { super(app); this.plugin = plugin; }
+  onOpen(): void {
+    this.contentEl.createEl("h2", { text: "Karte erkunden" });
+    const campaigns = this.app.vault.getMarkdownFiles().filter((file) => this.app.metadataCache.getFileCache(file)?.frontmatter?.type === "campaign");
+    let campaign: TFile | null = campaigns[0] ?? null;
+    const status = this.contentEl.createEl("p", { text: "Wähle eine Kampagne und eine Bewegungsrichtung." });
+    new Setting(this.contentEl).setName("Kampagne").addDropdown((dropdown) => {
+      campaigns.forEach((file) => dropdown.addOption(file.path, file.basename));
+      dropdown.setValue(campaign?.path ?? "").onChange((value) => { campaign = campaigns.find((file) => file.path === value) ?? null; });
+    });
+    const directions: Array<[HexDirection, string]> = [["n", "Norden"], ["ne", "Nordost"], ["se", "Südost"], ["s", "Süden"], ["sw", "Südwest"], ["nw", "Nordwest"]];
+    for (const [direction, label] of directions) {
+      new Setting(this.contentEl).addButton((button) => button.setButtonText(label).onClick(async () => {
+        const selectedCampaign = campaign;
+        if (!selectedCampaign) { new Notice("Lege zuerst eine Kampagne an."); return; }
+        const destination = await this.plugin.moveCampaign(selectedCampaign, direction);
+        status.setText(!destination ? "Für diese Kampagne ist keine Karte vorhanden." : destination.startsWith("Kartenrand") ? destination : `${destination}. Bewegung im Journal gespeichert.`);
+      }));
+    }
+  }
+  onClose(): void { this.contentEl.empty(); }
+}
+
+class RelationshipConflictModal extends Modal {
+  private readonly file: TFile;
+  private readonly target: TFile;
+  private readonly previousRole: RelationshipRole | undefined;
+  private readonly nextRole: RelationshipRole;
+  private readonly targetRole: RelationshipRole | undefined;
+  private readonly resolveDecision: (accepted: boolean) => void;
+  private settled = false;
+
+  constructor(app: App, file: TFile, target: TFile, previousRole: RelationshipRole | undefined, nextRole: RelationshipRole, targetRole: RelationshipRole | undefined, resolveDecision: (accepted: boolean) => void) {
+    super(app);
+    this.file = file;
+    this.target = target;
+    this.previousRole = previousRole;
+    this.nextRole = nextRole;
+    this.targetRole = targetRole;
+    this.resolveDecision = resolveDecision;
+  }
+
+  onOpen(): void {
+    this.contentEl.createEl("h2", { text: "Widersprüchliche Beziehung" });
+    this.contentEl.createEl("p", { text: `${this.file.basename} und ${this.target.basename} enthalten unterschiedliche Beziehungsangaben.` });
+    this.contentEl.createEl("p", { text: `Neue Angabe: ${this.nextRole}. Bisher: ${this.previousRole ?? "keine"}. Gegenangabe: ${this.targetRole ?? "keine"}.` });
+    new Setting(this.contentEl)
+      .addButton((button) => button.setButtonText("Neue Angabe übernehmen").setCta().onClick(() => this.finish(true)))
+      .addButton((button) => button.setButtonText("Bestehende Angabe beibehalten").onClick(() => this.finish(false)));
+  }
+
+  private finish(accepted: boolean): void {
+    if (this.settled) return;
+    this.settled = true;
+    this.resolveDecision(accepted);
+    this.close();
+  }
+
+  onClose(): void {
+    if (!this.settled) {
+      this.settled = true;
+      this.resolveDecision(false);
+    }
+    this.contentEl.empty();
+  }
+}
+
 class RelationshipModal extends Modal {
   private plugin: SoloSidianPlugin;
   constructor(app: App, plugin: SoloSidianPlugin) { super(app); this.plugin = plugin; }
   onOpen(): void {
     this.contentEl.createEl("h2", { text: "Beziehung anpassen" });
     const root = normalizePath(this.plugin.settings.rootFolder).replace(/\/$/, "");
-    const files = this.app.vault.getMarkdownFiles().filter((file) => file.path.startsWith(`${root}/`));
+    const files = this.app.vault.getMarkdownFiles().filter((file) => {
+      if (!file.path.startsWith(`${root}/`)) return false;
+      const type = this.app.metadataCache.getFileCache(file)?.frontmatter?.type;
+      return ["person", "family", "household", "settlement", "poi"].includes(String(type));
+    });
     let from = files[0]; let to = files[1]; let selection = "friend";
     new Setting(this.contentEl).setName("Von").addDropdown((dropdown) => { files.forEach((file) => dropdown.addOption(file.path, file.basename)); dropdown.setValue(from?.path ?? "").onChange((value) => { const selected = files.find((file) => file.path === value); if (selected) from = selected; }); });
     new Setting(this.contentEl).setName("Zu").addDropdown((dropdown) => { files.forEach((file) => dropdown.addOption(file.path, file.basename)); dropdown.setValue(to?.path ?? "").onChange((value) => { const selected = files.find((file) => file.path === value); if (selected) to = selected; }); });
