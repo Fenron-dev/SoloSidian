@@ -11,10 +11,11 @@ export interface ValidationIssue {
 export function validateEntities(files: ValidationFile[]): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const ids = new Map<string, string[]>();
+  const entityTypes = new Set(["world", "settlement", "person", "family", "household", "poi", "relationship", "campaign"]);
 
   for (const file of files) {
     const frontmatter = file.frontmatter;
-    if (!frontmatter || frontmatter.type === "relationship-index") continue;
+    if (!frontmatter || typeof frontmatter.type !== "string" || !entityTypes.has(frontmatter.type)) continue;
     const id = frontmatter.id;
     if (typeof id !== "string" || id.length === 0) {
       issues.push({ path: file.path, message: "Entität besitzt keine stabile id." });

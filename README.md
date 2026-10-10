@@ -10,7 +10,14 @@ Der erste Prototyp konzentriert sich auf:
 - eine Beziehungspflege über eine Obsidian-Ansicht,
 - synchronisierte Beziehungen auch bei direkten YAML-Änderungen,
 - eine lokale Datenintegritätsprüfung für Entitäten und Beziehungen,
+- ein Dashboard als Einstiegspunkt für Generierung, Beziehungen und Prüfungen,
+- unabhängige Kampagnen mit eigenem Journal,
+- ein einfacher Würfel-Dialog für Solo-Szenen,
 - eine Grundlage für Bases-Übersichten.
+
+## Erster Testablauf
+
+Nach dem Aktivieren des Plugins den Befehl `SoloSidian: Dashboard öffnen` starten. Dort können eine Siedlung, eine Kampagne und Journal-Einträge angelegt, Würfel geworfen und Beziehungen bearbeitet werden. Der Befehl `SoloSidian: Datenintegrität prüfen` prüft anschließend alle unterstützten Entitäten im RPG-Ordner.
 
 ## Entwicklung
 
