@@ -12,8 +12,18 @@ interface SoloSidianSettings {
 const DEFAULT_SETTINGS: SoloSidianSettings = { rootFolder: "RPG" };
 const DASHBOARD_VIEW_TYPE = "solosidian-dashboard";
 type RelationshipEntry = { id: string; type: RelationshipType };
+type RelationshipRole = "mother" | "father" | "parent" | "son" | "daughter" | "child" | "sibling" | "partner" | "friend" | "rival" | "colleague" | "resident";
+type RoleEntry = { id: string; role: RelationshipRole };
 const RELATIONSHIP_SEPARATOR = "::";
 const RELATIONSHIP_METADATA_PATTERN = /<!-- solosidian-relationship-types:\s*(\{[\s\S]*?\})\s*-->/;
+const RELATIONSHIP_PROPERTIES = ["mother", "father", "parents", "sons", "daughters", "children", "siblings", "partners", "friends", "rivals", "colleagues", "residents"] as const;
+type RelationshipProperty = typeof RELATIONSHIP_PROPERTIES[number];
+const FEMALE_FIRST_NAMES = new Set(["Mara", "Nela", "Elsa", "Rika", "Hedi"]);
+const MALE_FIRST_NAMES = new Set(["Jorin", "Lio", "Tomas", "Bram", "Oskar"]);
+const PROPERTY_ROLES: Record<RelationshipProperty, RelationshipRole> = {
+  mother: "mother", father: "father", parents: "parent", sons: "son", daughters: "daughter", children: "child",
+  siblings: "sibling", partners: "partner", friends: "friend", rivals: "rival", colleagues: "colleague", residents: "resident",
+};
 
 const RECIPROCAL_TYPES: Record<RelationshipType, RelationshipType> = {
   "parent-child": "parent-child",
@@ -27,8 +37,8 @@ const RECIPROCAL_TYPES: Record<RelationshipType, RelationshipType> = {
 
 export default class SoloSidianPlugin extends Plugin {
   settings: SoloSidianSettings = DEFAULT_SETTINGS;
-  private relationshipSnapshot = new Map<string, Map<string, RelationshipType>>();
-  private relationshipTypeCache = new Map<string, Map<string, RelationshipType>>();
+  private relationshipSnapshot = new Map<string, Map<string, RelationshipRole>>();
+  private relationshipTypeCache = new Map<string, Map<string, RelationshipRole>>();
   private relationshipSyncGuard = new Set<string>();
 
   async onload(): Promise<void> {
@@ -121,20 +131,22 @@ export default class SoloSidianPlugin extends Plugin {
       if (!this.app.vault.getAbstractFileByPath(normalizePath(path))) await this.app.vault.create(normalizePath(path), entityMarkdown(entity));
     }
     const entityFiles = new Map(entities.map((entity, index) => [entity.id, this.app.vault.getAbstractFileByPath(normalizePath(paths[index][1]))]).filter((entry): entry is [string, TFile] => entry[1] instanceof TFile));
-    const generatedRelationships = new Map<string, Array<{ id: string; type: RelationshipType }>>();
+    const generatedRelationships = new Map<string, RoleEntry[]>();
     for (const relationship of generated.relationships) {
       const from = generatedRelationships.get(relationship.from) ?? [];
-      from.push({ id: relationship.to, type: relationship.type });
+      from.push({ id: relationship.to, role: this.legacyRole(relationship.type) });
       generatedRelationships.set(relationship.from, from);
       const to = generatedRelationships.get(relationship.to) ?? [];
-      to.push({ id: relationship.from, type: relationship.reciprocalType ?? relationship.type });
+      to.push({ id: relationship.from, role: this.legacyRole(relationship.reciprocalType ?? relationship.type) });
       generatedRelationships.set(relationship.to, to);
     }
     for (const [id, entries] of generatedRelationships) {
       const file = entityFiles.get(id);
-      if (!file || this.app.metadataCache.getFileCache(file)?.frontmatter?.relationships) continue;
+      if (!file) continue;
       await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-        frontmatter.relationships = entries.map((entry) => this.serializeRelationshipEntry(entry));
+        const existing = this.readRoleEntries(file, frontmatter);
+        for (const entry of entries) existing.set(entry.id, entry);
+        this.writeRoleProperties(frontmatter, existing, file);
       });
     }
     const indexPath = normalizePath(`${root}/State/Beziehungen.md`);
@@ -145,8 +157,8 @@ export default class SoloSidianPlugin extends Plugin {
     new Notice(`${entities.length} Entitäten und ${generated.relationships.length} Beziehungen in ${root} erstellt.`);
   }
 
-  async addRelationship(from: TFile, to: TFile, type: RelationshipType): Promise<void> {
-    await this.syncRelationshipPair(from, to, type);
+  async addRelationship(from: TFile, to: TFile, role: RelationshipRole, reciprocalRole?: RelationshipRole): Promise<void> {
+    await this.syncRelationshipPair(from, to, role, reciprocalRole ?? this.reciprocalRole(role, from, to));
     new Notice(`Beziehung zwischen ${from.basename} und ${to.basename} gespeichert.`);
   }
 
@@ -167,9 +179,9 @@ export default class SoloSidianPlugin extends Plugin {
       if (!match) continue;
       try {
         const parsed = JSON.parse(match[1]) as Record<string, unknown>;
-        const types = new Map<string, RelationshipType>();
+        const types = new Map<string, RelationshipRole>();
         for (const [id, type] of Object.entries(parsed)) {
-          if (typeof type === "string" && type in RECIPROCAL_TYPES) types.set(id, type as RelationshipType);
+          if (typeof type === "string") types.set(id, this.legacyRole(type as RelationshipType));
         }
         this.relationshipTypeCache.set(file.path, types);
       } catch { /* Ignore malformed legacy metadata; the visible links remain usable. */ }
@@ -178,20 +190,17 @@ export default class SoloSidianPlugin extends Plugin {
 
   private async migrateRelationshipProperties(): Promise<void> {
     for (const file of this.app.vault.getMarkdownFiles()) {
-      const raw = this.app.metadataCache.getFileCache(file)?.frontmatter?.relationships;
-      if (!Array.isArray(raw)) continue;
-      const entriesById = new Map<string, RelationshipEntry>();
-      for (const value of raw) {
-        const entry = this.parseRelationshipEntry(value, file);
-        if (entry) entriesById.set(entry.id, entry);
-      }
-      const entries = [...entriesById.values()];
-      if (entries.length === 0) continue;
-      this.relationshipTypeCache.set(file.path, new Map(entries.map((entry) => [entry.id, entry.type])));
+      const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+      if (!frontmatter) continue;
+      const entries = this.readRoleEntries(file, frontmatter);
+      const inferredGender = frontmatter.type === "person" && typeof frontmatter.gender !== "string" ? this.inferGender(frontmatter.name) : null;
+      if (entries.size === 0 && !Array.isArray(frontmatter.relationships) && !inferredGender) continue;
+      this.relationshipTypeCache.set(file.path, new Map([...entries].map(([id, entry]) => [id, entry.role])));
       await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-        frontmatter.relationships = entries.map((entry) => this.displayRelationshipEntry(entry));
+        if (inferredGender) frontmatter.gender = inferredGender;
+        this.writeRoleProperties(frontmatter, entries, file);
       });
-      await this.writeRelationshipTypeMetadata(file);
+      await this.removeRelationshipTypeMetadata(file);
     }
   }
 
@@ -200,71 +209,133 @@ export default class SoloSidianPlugin extends Plugin {
     return typeof id === "string" ? id : file.path;
   }
 
-  private readRelationshipEntries(file: TFile): Map<string, RelationshipType> {
-    const raw = this.app.metadataCache.getFileCache(file)?.frontmatter?.relationships;
-    const entries = new Map<string, RelationshipType>();
-    if (!Array.isArray(raw)) return entries;
-    for (const value of raw) {
-      const entry = this.parseRelationshipEntry(value, file);
-      if (entry) entries.set(entry.id, entry.type);
+  private readRelationshipEntries(file: TFile): Map<string, RelationshipRole> {
+    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    return frontmatter ? new Map([...this.readRoleEntries(file, frontmatter)].map(([id, entry]) => [id, entry.role])) : new Map();
+  }
+
+  private readRoleEntries(file: TFile, frontmatter: Record<string, unknown>): Map<string, RoleEntry> {
+    const entries = new Map<string, RoleEntry>();
+    for (const property of RELATIONSHIP_PROPERTIES) {
+      const role = PROPERTY_ROLES[property];
+      for (const value of this.asList(frontmatter[property])) {
+        const target = this.resolveEntityFromValue(value);
+        if (target) entries.set(this.entityId(target), { id: this.entityId(target), role });
+      }
+    }
+    for (const property of ["household", "settlement"]) {
+      for (const value of this.asList(frontmatter[property])) {
+        const target = this.resolveEntityFromValue(value);
+        if (target) entries.set(this.entityId(target), { id: this.entityId(target), role: "resident" });
+      }
+    }
+    const raw = frontmatter.relationships;
+    if (Array.isArray(raw)) {
+      for (const value of raw) {
+        const entry = this.parseLegacyRelationshipEntry(value, file);
+        if (entry) entries.set(entry.id, entry);
+      }
     }
     return entries;
   }
 
-  private parseRelationshipEntry(value: unknown, file?: TFile): RelationshipEntry | null {
+  private asList(value: unknown): unknown[] {
+    return Array.isArray(value) ? value : value === undefined || value === null || value === "" ? [] : [value];
+  }
+
+  private parseLegacyRelationshipEntry(value: unknown, file?: TFile): RoleEntry | null {
     if (typeof value === "string") {
       const separator = value.indexOf(RELATIONSHIP_SEPARATOR);
       if (separator > 0) {
         const type = value.slice(0, separator);
         const id = value.slice(separator + RELATIONSHIP_SEPARATOR.length);
-        if (id && type in RECIPROCAL_TYPES) return this.normalizeRelationshipEntry({ id, type: type as RelationshipType });
+        if (id && type in RECIPROCAL_TYPES) return this.normalizeRoleEntry({ id, role: this.legacyRole(type as RelationshipType) });
       }
       const linkMatch = /^\[\[([^|\]]+)(?:\|[^\]]+)?\]\]$/.exec(value.trim());
       if (linkMatch) {
         const target = this.resolveEntity(linkMatch[1]);
         if (!target) return null;
         const targetId = this.entityId(target);
-        const type = file ? this.relationshipTypeCache.get(file.path)?.get(targetId) : undefined;
-        return { id: targetId, type: type ?? this.inferRelationshipType(target) };
+        const role = file ? this.relationshipTypeCache.get(file.path)?.get(targetId) : undefined;
+        return { id: targetId, role: role ?? this.inferRelationshipRole(target) };
       }
       return null;
     }
     if (value && typeof value === "object") {
       const candidate = value as Partial<RelationshipEntry>;
       if (typeof candidate.id === "string" && typeof candidate.type === "string" && candidate.type in RECIPROCAL_TYPES) {
-        return this.normalizeRelationshipEntry({ id: candidate.id, type: candidate.type as RelationshipType });
+        return this.normalizeRoleEntry({ id: candidate.id, role: this.legacyRole(candidate.type as RelationshipType) });
       }
     }
     return null;
   }
 
-  private serializeRelationshipEntry(entry: RelationshipEntry): string {
-    return `${entry.type}${RELATIONSHIP_SEPARATOR}${entry.id}`;
+  private legacyRole(type: RelationshipType): RelationshipRole {
+    return type === "parent-child" ? "parent" : type;
   }
 
-  private normalizeRelationshipEntry(entry: RelationshipEntry): RelationshipEntry {
+  private normalizeRoleEntry(entry: RoleEntry): RoleEntry {
     const target = this.resolveEntity(entry.id);
-    return target ? { id: this.entityId(target), type: entry.type } : entry;
+    return target ? { id: this.entityId(target), role: entry.role } : entry;
   }
 
-  private displayRelationshipEntry(entry: RelationshipEntry): string {
-    const target = this.resolveEntity(entry.id);
-    return target ? `[[${target.basename}]]` : this.serializeRelationshipEntry(entry);
+  private resolveEntityFromValue(value: unknown): TFile | null {
+    if (typeof value !== "string") return null;
+    const linkMatch = /^\[\[([^|\]]+)(?:\|[^\]]+)?\]\]$/.exec(value.trim());
+    return this.resolveEntity(linkMatch ? linkMatch[1] : value);
   }
 
-  private inferRelationshipType(target: TFile): RelationshipType {
+  private inferRelationshipRole(target: TFile): RelationshipRole {
     const type = this.app.metadataCache.getFileCache(target)?.frontmatter?.type;
     return type === "household" || type === "settlement" ? "resident" : "friend";
   }
 
-  private async writeRelationshipTypeMetadata(file: TFile): Promise<void> {
-    const types = this.relationshipTypeCache.get(file.path) ?? new Map<string, RelationshipType>();
-    const marker = `<!-- solosidian-relationship-types: ${JSON.stringify(Object.fromEntries(types))} -->`;
+  private inferGender(name: unknown): "male" | "female" | null {
+    if (typeof name !== "string") return null;
+    const firstName = name.split(/\s+/)[0];
+    if (FEMALE_FIRST_NAMES.has(firstName)) return "female";
+    if (MALE_FIRST_NAMES.has(firstName)) return "male";
+    return null;
+  }
+
+  private propertyForRole(role: RelationshipRole): RelationshipProperty {
+    if (role === "mother" || role === "father" || role === "parent" || role === "son" || role === "daughter" || role === "child") return role === "parent" ? "parents" : role === "child" ? "children" : role === "son" ? "sons" : role === "daughter" ? "daughters" : role;
+    if (role === "sibling") return "siblings";
+    if (role === "partner") return "partners";
+    if (role === "friend") return "friends";
+    if (role === "rival") return "rivals";
+    if (role === "colleague") return "colleagues";
+    return "residents";
+  }
+
+  private writeRoleProperties(frontmatter: Record<string, unknown>, entries: Map<string, RoleEntry>, owner?: TFile): void {
+    delete frontmatter.relationships;
+    for (const property of RELATIONSHIP_PROPERTIES) delete frontmatter[property];
+    const grouped = new Map<string, string[]>();
+    for (const entry of entries.values()) {
+      const target = this.resolveEntity(entry.id);
+      if (!target) continue;
+      const property = this.propertyForEntry(entry.role, owner, target);
+      const values = grouped.get(property) ?? [];
+      values.push(`[[${target.basename}]]`);
+      grouped.set(property, values);
+    }
+    for (const [property, values] of grouped) frontmatter[property] = ["mother", "father", "household", "settlement"].includes(property) ? values[0] : values;
+  }
+
+  private propertyForEntry(role: RelationshipRole, owner: TFile | undefined, target: TFile): string {
+    if (role === "resident" && owner) {
+      const ownerType = this.app.metadataCache.getFileCache(owner)?.frontmatter?.type;
+      const targetType = this.app.metadataCache.getFileCache(target)?.frontmatter?.type;
+      if (ownerType === "person" && targetType === "household") return "household";
+      if (ownerType === "person" && targetType === "settlement") return "settlement";
+    }
+    return this.propertyForRole(role);
+  }
+
+  private async removeRelationshipTypeMetadata(file: TFile): Promise<void> {
     await this.app.vault.process(file, (content) => {
-      const withoutMarker = content.replace(RELATIONSHIP_METADATA_PATTERN, "").replace(/\n{3,}/g, "\n\n");
-      const closing = withoutMarker.indexOf("\n---", 4);
-      if (closing < 0) return withoutMarker;
-      return `${withoutMarker.slice(0, closing + 4)}\n\n${marker}${withoutMarker.slice(closing + 4)}`;
+      return content.replace(RELATIONSHIP_METADATA_PATTERN, "").replace(/\n{3,}/g, "\n\n");
     });
   }
 
@@ -275,28 +346,29 @@ export default class SoloSidianPlugin extends Plugin {
 
   private async reconcileRelationshipFile(file: TFile): Promise<void> {
     const current = this.readRelationshipEntries(file);
-    const previous = this.relationshipSnapshot.get(file.path) ?? new Map<string, RelationshipType>();
+    const previous = this.relationshipSnapshot.get(file.path) ?? new Map<string, RelationshipRole>();
     const references = new Set([...previous.keys(), ...current.keys()]);
     this.relationshipSnapshot.set(file.path, current);
     for (const reference of references) {
       const target = this.resolveEntity(reference);
       if (!target || target.path === file.path) continue;
-      const nextType = current.get(reference);
-      if (nextType) {
-        await this.syncRelationshipPair(file, target, nextType);
+      const nextRole = current.get(reference);
+      if (nextRole) {
+        await this.syncRelationshipPair(file, target, nextRole, this.reciprocalRole(nextRole, file, target));
       } else if (previous.has(reference)) {
-        await this.syncRelationshipPair(file, target, previous.get(reference)!, true);
+        const previousRole = previous.get(reference)!;
+        await this.syncRelationshipPair(file, target, previousRole, this.reciprocalRole(previousRole, file, target), true);
       }
     }
   }
 
-  private async syncRelationshipPair(from: TFile, to: TFile, type: RelationshipType, remove = false): Promise<void> {
+  private async syncRelationshipPair(from: TFile, to: TFile, role: RelationshipRole, reciprocalRole: RelationshipRole, remove = false): Promise<void> {
     const key = [from.path, to.path].sort().join("::");
     if (this.relationshipSyncGuard.has(key)) return;
     this.relationshipSyncGuard.add(key);
     try {
-      await this.setRelationshipEntry(from, to, type, remove);
-      await this.setRelationshipEntry(to, from, RECIPROCAL_TYPES[type], remove);
+      await this.setRelationshipEntry(from, to, role, remove);
+      await this.setRelationshipEntry(to, from, reciprocalRole, remove);
       this.relationshipSnapshot.set(from.path, this.readRelationshipEntries(from));
       this.relationshipSnapshot.set(to.path, this.readRelationshipEntries(to));
     } finally {
@@ -304,23 +376,48 @@ export default class SoloSidianPlugin extends Plugin {
     }
   }
 
-  private async setRelationshipEntry(file: TFile, target: TFile, type: RelationshipType, remove: boolean): Promise<void> {
+  private async setRelationshipEntry(file: TFile, target: TFile, role: RelationshipRole, remove: boolean): Promise<void> {
     const targetId = this.entityId(target);
-    const types = this.relationshipTypeCache.get(file.path) ?? new Map<string, RelationshipType>();
     await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-      const existing: unknown[] = Array.isArray(frontmatter.relationships) ? frontmatter.relationships : [];
-      const retained = new Map<string, RelationshipEntry>();
-      for (const value of existing) {
-        const entry = this.parseRelationshipEntry(value, file);
-        if (entry && entry.id !== targetId && entry.id !== target.path) retained.set(entry.id, entry);
-      }
-      const filtered = [...retained.values()].map((entry) => this.displayRelationshipEntry(entry));
-      if (remove) types.delete(targetId);
-      else { types.set(targetId, type); filtered.push(this.displayRelationshipEntry({ id: targetId, type })); }
-      frontmatter.relationships = filtered;
+      const retained = this.readRoleEntries(file, frontmatter);
+      retained.delete(targetId);
+      if (!remove) retained.set(targetId, { id: targetId, role });
+      this.writeRoleProperties(frontmatter, retained, file);
     });
-    this.relationshipTypeCache.set(file.path, types);
-    await this.writeRelationshipTypeMetadata(file);
+    await this.removeRelationshipTypeMetadata(file);
+  }
+
+  private genderOf(file: TFile): "male" | "female" | null {
+    const gender = this.app.metadataCache.getFileCache(file)?.frontmatter?.gender;
+    return gender === "male" || gender === "female" ? gender : null;
+  }
+
+  private reciprocalRole(role: RelationshipRole, from: TFile, to: TFile): RelationshipRole {
+    if (role === "mother" || role === "father") return this.genderOf(from) === "male" ? "son" : this.genderOf(from) === "female" ? "daughter" : "child";
+    if (role === "son" || role === "daughter") return this.genderOf(from) === "male" ? "father" : this.genderOf(from) === "female" ? "mother" : "parent";
+    if (role === "parent") return this.genderOf(from) === "male" ? "son" : this.genderOf(from) === "female" ? "daughter" : "child";
+    if (role === "child") return this.genderOf(from) === "male" ? "father" : this.genderOf(from) === "female" ? "mother" : "parent";
+    void to;
+    return role;
+  }
+
+  relationshipRoles(selection: string, from: TFile, to: TFile): [RelationshipRole, RelationshipRole] {
+    if (selection === "mother-of") return [this.childRole(to), "mother"];
+    if (selection === "father-of") return [this.childRole(to), "father"];
+    if (selection === "son-of") return [this.parentRole(to), "son"];
+    if (selection === "daughter-of") return [this.parentRole(to), "daughter"];
+    if (selection === "parent-of") return ["child", "parent"];
+    if (selection === "child-of") return ["parent", "child"];
+    const role = selection as RelationshipRole;
+    return [role, this.reciprocalRole(role, from, to)];
+  }
+
+  private childRole(file: TFile): RelationshipRole {
+    return this.genderOf(file) === "male" ? "son" : this.genderOf(file) === "female" ? "daughter" : "child";
+  }
+
+  private parentRole(file: TFile): RelationshipRole {
+    return this.genderOf(file) === "male" ? "father" : this.genderOf(file) === "female" ? "mother" : "parent";
   }
 }
 
@@ -458,11 +555,34 @@ class RelationshipModal extends Modal {
     this.contentEl.createEl("h2", { text: "Beziehung anpassen" });
     const root = normalizePath(this.plugin.settings.rootFolder).replace(/\/$/, "");
     const files = this.app.vault.getMarkdownFiles().filter((file) => file.path.startsWith(`${root}/`));
-    let from = files[0]; let to = files[1]; let type: RelationshipType = "friend";
+    let from = files[0]; let to = files[1]; let selection = "friend";
     new Setting(this.contentEl).setName("Von").addDropdown((dropdown) => { files.forEach((file) => dropdown.addOption(file.path, file.basename)); dropdown.setValue(from?.path ?? "").onChange((value) => { const selected = files.find((file) => file.path === value); if (selected) from = selected; }); });
     new Setting(this.contentEl).setName("Zu").addDropdown((dropdown) => { files.forEach((file) => dropdown.addOption(file.path, file.basename)); dropdown.setValue(to?.path ?? "").onChange((value) => { const selected = files.find((file) => file.path === value); if (selected) to = selected; }); });
-    new Setting(this.contentEl).setName("Typ").addDropdown((dropdown) => { ["friend", "partner", "parent-child", "sibling", "rival", "colleague", "resident"].forEach((value) => dropdown.addOption(value, value)); dropdown.setValue(type).onChange((value) => { type = value as RelationshipType; }); });
-    new Setting(this.contentEl).addButton((button) => button.setButtonText("Speichern").setCta().onClick(async () => { if (from && to && from.path !== to.path) await this.plugin.addRelationship(from, to, type); this.close(); }));
+    new Setting(this.contentEl).setName("Beziehung von A zu B").addDropdown((dropdown) => {
+      const options: Record<string, string> = {
+        friend: "Freund/in",
+        partner: "Partner/in",
+        sibling: "Geschwister",
+        rival: "Rivale/in",
+        colleague: "Kollege/Kollegin",
+        resident: "Bewohner/in von",
+        "mother-of": "A ist Mutter von B",
+        "father-of": "A ist Vater von B",
+        "son-of": "A ist Sohn von B",
+        "daughter-of": "A ist Tochter von B",
+        "parent-of": "A ist Elternteil von B",
+        "child-of": "A ist Kind von B",
+      };
+      Object.entries(options).forEach(([value, label]) => dropdown.addOption(value, label));
+      dropdown.setValue(selection).onChange((value) => { selection = value; });
+    });
+    new Setting(this.contentEl).addButton((button) => button.setButtonText("Speichern").setCta().onClick(async () => {
+      if (from && to && from.path !== to.path) {
+        const [role, reciprocalRole] = this.plugin.relationshipRoles(selection, from, to);
+        await this.plugin.addRelationship(from, to, role, reciprocalRole);
+      }
+      this.close();
+    }));
   }
   onClose(): void { this.contentEl.empty(); }
 }

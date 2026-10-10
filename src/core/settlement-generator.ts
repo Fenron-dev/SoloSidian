@@ -1,7 +1,11 @@
 import { stableId, relationshipId } from "./ids";
 import type { GeneratedEntity, GeneratedSettlement, RelationshipRecord } from "./types";
 
-const firstNames = ["Mara", "Jorin", "Lio", "Nela", "Tomas", "Elsa", "Rika", "Bram", "Hedi", "Oskar"];
+const firstNames = [
+  { name: "Mara", gender: "female" }, { name: "Jorin", gender: "male" }, { name: "Lio", gender: "male" },
+  { name: "Nela", gender: "female" }, { name: "Tomas", gender: "male" }, { name: "Elsa", gender: "female" },
+  { name: "Rika", gender: "female" }, { name: "Bram", gender: "male" }, { name: "Hedi", gender: "female" }, { name: "Oskar", gender: "male" },
+] as const;
 const familyNames = ["Hartmann", "Falk", "Keller", "Morgen", "Stein", "Waldner", "Eber", "Lind"];
 const occupations = ["Bauer", "Schmied", "Händlerin", "Wirt", "Fischer", "Heilerin", "Wächter", "Bäcker"];
 
@@ -17,7 +21,7 @@ class Random {
     return this.state % max;
   }
 
-  pick<T>(values: T[]): T {
+  pick<T>(values: readonly T[]): T {
     return values[this.next(values.length)];
   }
 }
@@ -89,12 +93,13 @@ export function generateSettlement(seed: string, name = "Eichenfurt", population
     const familyPeople: GeneratedEntity[] = [];
     for (let memberIndex = 0; memberIndex < members && people.length < population; memberIndex += 1) {
       const personId = stableId("person", seed, personIndex);
-      let personName = `${random.pick(firstNames)} ${surname}`;
+      const firstName = random.pick(firstNames);
+      let personName = `${firstName.name} ${surname}`;
       if (usedPersonNames.has(personName)) personName = `${personName} ${memberIndex + 2}`;
       usedPersonNames.add(personName);
       const occupation = random.pick(occupations);
       const person = entity("person", personId, personName, `${occupation} aus ${name}.`, {
-        id: personId, type: "person", name: personName, summary: `${occupation} aus ${name}.`, settlement: link(settlementId, name), family: link(familyId, familyName), household: link(householdId, householdName), occupation, seed,
+        id: personId, type: "person", name: personName, summary: `${occupation} aus ${name}.`, settlement: link(settlementId, name), family: link(familyId, familyName), household: link(householdId, householdName), occupation, gender: firstName.gender, seed,
       }, `## Kurzprofil\n\n${personName} arbeitet als ${occupation} und lebt im ${link(householdId, householdName)}.\n\n> [!info]- Verborgenes Wissen\n> Noch nicht festgelegt.\n`);
       people.push(person);
       familyPeople.push(person);

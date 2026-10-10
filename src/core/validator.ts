@@ -34,15 +34,21 @@ export function validateEntities(files: ValidationFile[]): ValidationIssue[] {
   }
 
   for (const file of files) {
-    const raw = file.frontmatter?.relationships;
-    if (!Array.isArray(raw)) continue;
-    for (const relationship of raw) {
+    const values: unknown[] = [];
+    if (Array.isArray(file.frontmatter?.relationships)) values.push(...file.frontmatter.relationships as unknown[]);
+    for (const field of ["mother", "father", "parents", "sons", "daughters", "children", "siblings", "partners", "friends", "rivals", "colleagues", "residents"]) {
+      const value = file.frontmatter?.[field];
+      if (Array.isArray(value)) values.push(...value);
+      else if (value !== undefined) values.push(value);
+    }
+    for (const relationship of values) {
       const targetId = typeof relationship === "string"
-        ? relationship.split("::", 2)[1]
+        ? relationship.startsWith("[[") ? relationship.replace(/^\[\[/, "").replace(/\]\]$/, "").split("|")[0] : relationship.split("::", 2)[1] ?? relationship
         : relationship && typeof relationship === "object" && typeof (relationship as { id?: unknown }).id === "string"
           ? (relationship as { id: string }).id
           : undefined;
-      if (targetId && !ids.has(targetId) && !files.some((candidate) => candidate.path === targetId)) {
+      const target = targetId && files.find((candidate) => candidate.path === targetId || candidate.path.replace(/\.md$/, "") === targetId || candidate.frontmatter?.name === targetId);
+      if (targetId && !ids.has(targetId) && !target) {
         issues.push({ path: file.path, message: `Beziehung verweist auf '${targetId}', diese Entität fehlt.` });
       }
     }

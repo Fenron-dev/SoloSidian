@@ -10,6 +10,7 @@ Der erste Prototyp konzentriert sich auf:
 - eine Beziehungspflege über eine Obsidian-Ansicht,
 - synchronisierte Beziehungen auch bei direkten YAML-Änderungen,
 - Obsidian-kompatible Beziehungen als einfache Property-Liste mit automatischer Migration älterer YAML-Objektlisten,
+- getrennte Beziehungs-Properties für Mutter, Vater, Eltern, Söhne, Töchter, Geschwister, Partner, Freunde, Rivalen und Kollegen,
 - eine lokale Datenintegritätsprüfung für Entitäten und Beziehungen,
 - ein Dashboard als Einstiegspunkt für Generierung, Beziehungen und Prüfungen,
 - unabhängige Kampagnen mit eigenem Journal,
