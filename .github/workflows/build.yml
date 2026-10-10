@@ -21,7 +21,11 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+      - name: Package Obsidian plugin
+        run: cd dist && zip -r ../solosidian-plugin.zip main.js manifest.json
       - uses: actions/upload-artifact@v4
         with:
           name: solosidian-${{ github.sha }}
-          path: dist/
+          path: |
+            dist/
+            solosidian-plugin.zip
