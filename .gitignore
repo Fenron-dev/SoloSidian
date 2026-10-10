@@ -4,3 +4,5 @@ dist/
 # Local inspiration vaults are not project source and may contain bundled
 # third-party plugins and assets.
 Konzept/Obsidian - BSP/
+# Local Obsidian test vault, populated from a GitHub Actions build.
+Beispielvault/
