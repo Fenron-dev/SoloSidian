@@ -20,6 +20,14 @@ Der erste Prototyp konzentriert sich auf:
 - ein transparentes Standard-Regelprofil für Proben mit Attribut-, Ausrüstungs- und Schwierigkeitswerten,
 - eine kleine deterministische Hexmap mit POI-Links, Bewegung und Positionsspeicherung,
 - eine Grundlage für Bases-Übersichten.
+- eine Entity Registry für stabile IDs und scoped Namensauflösung,
+- Regelvariablen und automatische Modifikatoren aus Charakter- und Zustandswerten,
+- Kampagnen-Fortsetzungen mit eingefrorenem Quellspielstand,
+- Vorschau-/Neuwürfel-Hilfen mit Schutz manueller Änderungen,
+- getrennte öffentliche und charakterbezogene Wissensstände,
+- validierbare Erweiterungspakete mit Abhängigkeiten,
+- Timeline-/Stammbaum-Hilfen sowie deterministische Dungeon- und Battlemap-Grundlagen,
+- einen Dungeon-Generator über das Dashboard-Kommando.
 
 ## Erster Testablauf
 

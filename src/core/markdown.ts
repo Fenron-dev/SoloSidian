@@ -1,5 +1,19 @@
 import type { GeneratedEntity, RelationshipRecord } from "./types.ts";
 
+export function parseFrontmatter(source: string): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const line of source.split(/\r?\n/)) {
+    const match = /^([^:#][^:]*):\s*(.*)$/.exec(line.trim());
+    if (!match) continue;
+    const raw = match[2].trim();
+    if (raw.startsWith("[") && raw.endsWith("]")) {
+      try { result[match[1].trim()] = JSON.parse(raw.replace(/'/g, '"')); continue; } catch { /* keep scalar */ }
+    }
+    result[match[1].trim()] = raw.replace(/^['"]|['"]$/g, "");
+  }
+  return result;
+}
+
 function yamlValue(value: string | string[]): string {
   if (Array.isArray(value)) return `[${value.map((item) => JSON.stringify(item)).join(", ")}]`;
   return JSON.stringify(value);

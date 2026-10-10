@@ -7,6 +7,8 @@ import { rollDice } from "./core/dice.ts";
 import { askOracle, oracleCategories, randomEvent } from "./core/oracle.ts";
 import { performCheck, STANDARD_RULESET, type CheckResult } from "./core/rules.ts";
 import { generateHexMap, hexKey, moveHex, type HexDirection, type HexCell } from "./core/map.ts";
+import { forkCampaign, type CampaignSnapshot } from "./core/campaign.ts";
+import { generateDungeon } from "./core/dungeon.ts";
 
 interface SoloSidianSettings {
   rootFolder: string;
@@ -54,6 +56,7 @@ export default class SoloSidianPlugin extends Plugin {
     this.addCommand({ id: "validate-vault", name: "Datenintegrität prüfen", callback: () => this.validateVault() });
     this.addCommand({ id: "open-dashboard", name: "Dashboard öffnen", callback: () => { void this.activateDashboard(); } });
     this.addCommand({ id: "create-campaign", name: "Kampagne anlegen", callback: () => new CampaignModal(this.app, this).open() });
+    this.addCommand({ id: "continue-campaign", name: "Kampagne fortsetzen", callback: () => new CampaignContinuationModal(this.app, this).open() });
     this.addCommand({ id: "create-journal-entry", name: "Journal-Eintrag anlegen", callback: () => new JournalModal(this.app, this).open() });
     this.addCommand({ id: "roll-dice", name: "Würfel werfen", callback: () => new DiceModal(this.app).open() });
     this.addCommand({ id: "ask-oracle", name: "Orakel fragen", callback: () => new OracleModal(this.app, this).open() });
@@ -61,6 +64,7 @@ export default class SoloSidianPlugin extends Plugin {
     this.addCommand({ id: "edit-campaign-state", name: "Kampagnenzustand bearbeiten", callback: () => new CampaignStateModal(this.app, this).open() });
     this.addCommand({ id: "run-check", name: "Probe durchführen", callback: () => new CheckModal(this.app, this).open() });
     this.addCommand({ id: "explore-map", name: "Karte erkunden", callback: () => new MapModal(this.app, this).open() });
+    this.addCommand({ id: "generate-dungeon", name: "Dungeon generieren", callback: () => new DungeonModal(this.app, this).open() });
     this.addRibbonIcon("network", "SoloSidian: Siedlung generieren", () => new SettlementModal(this.app, this).open());
     this.addRibbonIcon("home", "SoloSidian: Dashboard öffnen", () => { void this.activateDashboard(); });
     this.registerEvent(this.app.metadataCache.on("changed", (file) => { void this.reconcileRelationshipFile(file); }));
@@ -116,6 +120,42 @@ export default class SoloSidianPlugin extends Plugin {
     new Notice(`Kampagne „${safeName}“ wurde angelegt.`);
   }
 
+  async continueCampaign(source: TFile, name: string, character: TFile | null = null): Promise<void> {
+    const sourceRoot = source.path.replace(/\/Campaign\.md$/, "");
+    const sourceState = this.app.vault.getAbstractFileByPath(normalizePath(`${sourceRoot}/State/Spielstand.md`));
+    const sourceFrontmatter = sourceState instanceof TFile ? this.app.metadataCache.getFileCache(sourceState)?.frontmatter ?? {} : {};
+    const sourceCampaign = this.app.metadataCache.getFileCache(source)?.frontmatter;
+    const snapshot: CampaignSnapshot = {
+      id: String(sourceCampaign?.id ?? source.basename),
+      name: source.basename,
+      turn: Number(sourceFrontmatter.turn ?? sourceCampaign?.turn ?? 0),
+      status: String(sourceCampaign?.status ?? "active") === "completed" ? "completed" : "active",
+      state: { ...sourceFrontmatter },
+    };
+    const id = `rpg-campaign-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+    const fork = forkCampaign(snapshot, id, name);
+    const sourceCharacter = character ?? this.campaignCharacter(source);
+    await this.createCampaign(name, null, sourceCharacter);
+    const created = this.app.vault.getAbstractFileByPath(normalizePath(`${this.settings.rootFolder}/Campaigns/${name}/Campaign.md`));
+    const createdState = this.app.vault.getAbstractFileByPath(normalizePath(`${this.settings.rootFolder}/Campaigns/${name}/State/Spielstand.md`));
+    if (created instanceof TFile) await this.app.fileManager.processFrontMatter(created, (frontmatter) => { frontmatter.sourceCampaign = `[[${source.basename}]]`; frontmatter.sourceTurn = fork.sourceTurn ?? 0; });
+    if (createdState instanceof TFile) await this.app.fileManager.processFrontMatter(createdState, (frontmatter) => Object.assign(frontmatter, fork.state));
+  }
+
+  async createDungeon(name: string, seed: string): Promise<void> {
+    const safeName = name.trim() || "Dungeon";
+    const safeSeed = seed.trim() || safeName.toLowerCase();
+    const dungeon = generateDungeon(safeSeed);
+    const folder = normalizePath(`${this.settings.rootFolder}/Dungeons`);
+    if (!this.app.vault.getAbstractFileByPath(folder)) await this.app.vault.createFolder(folder);
+    const path = normalizePath(`${folder}/${safeName}.md`);
+    if (this.app.vault.getAbstractFileByPath(path)) throw new Error(`Dungeon '${safeName}' existiert bereits.`);
+    const rooms = dungeon.rooms.map((room) => `- **${room.id}** (${room.x}, ${room.y}) ${room.width}×${room.height}`).join("\n");
+    const corridors = dungeon.corridors.map(([from, to]) => `- [[${from}]] ↔ [[${to}]]`).join("\n");
+    await this.app.vault.create(path, `---\ntype: dungeon\nid: rpg-dungeon-${safeSeed.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}\nseed: ${JSON.stringify(safeSeed)}\nwidth: ${dungeon.width}\nheight: ${dungeon.height}\n---\n\n# ${safeName}\n\n## Räume\n${rooms}\n\n## Verbindungen\n${corridors}\n`);
+    new Notice(`Dungeon '${safeName}' erstellt.`);
+  }
+
   async createJournalEntry(campaign: TFile, text: string): Promise<void> {
     const content = text.trim();
     if (!content) { new Notice("Der Journal-Eintrag ist leer."); return; }
@@ -149,7 +189,12 @@ export default class SoloSidianPlugin extends Plugin {
   async performCampaignCheck(campaign: TFile, action: string, attribute: string, equipmentBonus: string, difficulty: string): Promise<CheckResult | null> {
     const parsed = [attribute, equipmentBonus, difficulty].map((value) => Number(value.trim()));
     try {
-      const result = performCheck({ action, attribute: parsed[0], equipmentBonus: parsed[1], difficulty: parsed[2] });
+      const character = this.campaignCharacter(campaign);
+      const characterFrontmatter = character ? this.app.metadataCache.getFileCache(character)?.frontmatter : undefined;
+      const root = campaign.path.replace(/\/Campaign\.md$/, "");
+      const state = this.app.vault.getAbstractFileByPath(normalizePath(`${root}/State/Spielstand.md`));
+      const stateFrontmatter = state instanceof TFile ? this.app.metadataCache.getFileCache(state)?.frontmatter : undefined;
+      const result = performCheck({ action, attribute: parsed[0], equipmentBonus: parsed[1], difficulty: parsed[2], character: characterFrontmatter, state: stateFrontmatter });
       const outcome = `${result.success ? result.ruleset.successLabel : "Kein Erfolg"}: ${result.total} gegen Schwierigkeit ${result.difficulty}. Wurf ${result.dice.expression} (${result.dice.rolls.join(", ")}) + Attribut ${result.attribute} + Ausrüstung ${result.equipmentBonus}.`;
       await this.createJournalEntry(campaign, `## Probe: ${result.action}\n\n${outcome}`);
       return result;
@@ -713,6 +758,35 @@ class CampaignModal extends Modal {
   onClose(): void { this.contentEl.empty(); }
 }
 
+class CampaignContinuationModal extends Modal {
+  private plugin: SoloSidianPlugin;
+  constructor(app: App, plugin: SoloSidianPlugin) { super(app); this.plugin = plugin; }
+  onOpen(): void {
+    this.contentEl.createEl("h2", { text: "Kampagne fortsetzen" });
+    const campaigns = this.app.vault.getMarkdownFiles().filter((file) => this.app.metadataCache.getFileCache(file)?.frontmatter?.type === "campaign");
+    let source: TFile | null = campaigns[0] ?? null;
+    let name = source ? `${source.basename} – Fortsetzung` : "Neue Fortsetzung";
+    let character: TFile | null = null;
+    new Setting(this.contentEl).setName("Quellkampagne").addDropdown((dropdown) => {
+      campaigns.forEach((file) => dropdown.addOption(file.path, file.basename));
+      dropdown.setValue(source?.path ?? "").onChange((value) => { source = campaigns.find((file) => file.path === value) ?? null; });
+    });
+    new Setting(this.contentEl).setName("Name").addText((text) => text.setValue(name).onChange((value) => { name = value; }));
+    const characters = this.app.vault.getMarkdownFiles().filter((file) => this.app.metadataCache.getFileCache(file)?.frontmatter?.type === "person");
+    new Setting(this.contentEl).setName("Spielercharakter").addDropdown((dropdown) => {
+      dropdown.addOption("", "Aus Quelle übernehmen");
+      characters.forEach((file) => dropdown.addOption(file.path, file.basename));
+      dropdown.setValue("").onChange((value) => { character = characters.find((file) => file.path === value) ?? null; });
+    });
+    new Setting(this.contentEl).addButton((button) => button.setButtonText("Fortsetzen").setCta().onClick(async () => {
+      if (!source || !name.trim()) { new Notice("Wähle eine Quelle und gib einen Namen ein."); return; }
+      await this.plugin.continueCampaign(source, name.trim(), character);
+      this.close();
+    }));
+  }
+  onClose(): void { this.contentEl.empty(); }
+}
+
 class JournalModal extends Modal {
   private plugin: SoloSidianPlugin;
   constructor(app: App, plugin: SoloSidianPlugin) { super(app); this.plugin = plugin; }
@@ -902,6 +976,22 @@ class MapModal extends Modal {
         status.setText(!destination ? "Für diese Kampagne ist keine Karte vorhanden." : destination.startsWith("Kartenrand") ? destination : `${destination}. Bewegung im Journal gespeichert.`);
       }));
     }
+  }
+  onClose(): void { this.contentEl.empty(); }
+}
+
+class DungeonModal extends Modal {
+  private plugin: SoloSidianPlugin;
+  constructor(app: App, plugin: SoloSidianPlugin) { super(app); this.plugin = plugin; }
+  onOpen(): void {
+    this.contentEl.createEl("h2", { text: "Dungeon generieren" });
+    let name = "Verlassene Ruinen";
+    let seed = "dungeon-001";
+    new Setting(this.contentEl).setName("Name").addText((text) => text.setValue(name).onChange((value) => { name = value; }));
+    new Setting(this.contentEl).setName("Seed").addText((text) => text.setValue(seed).onChange((value) => { seed = value; }));
+    new Setting(this.contentEl).addButton((button) => button.setButtonText("Generieren").setCta().onClick(async () => {
+      try { await this.plugin.createDungeon(name, seed); this.close(); } catch (error) { new Notice(error instanceof Error ? error.message : "Dungeon konnte nicht erstellt werden."); }
+    }));
   }
   onClose(): void { this.contentEl.empty(); }
 }
