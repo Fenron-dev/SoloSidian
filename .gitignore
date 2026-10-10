@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.DS_Store
+# Local inspiration vaults are not project source and may contain bundled
+# third-party plugins and assets.
+Konzept/Obsidian - BSP/

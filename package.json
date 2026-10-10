@@ -1,0 +1,17 @@
+{
+  "name": "solosidian",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline-first solo RPG and worldbuilding tools for Obsidian.",
+  "scripts": {
+    "build": "node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.24.0",
+    "obsidian": "^1.7.2",
+    "typescript": "^5.7.2"
+  }
+}
